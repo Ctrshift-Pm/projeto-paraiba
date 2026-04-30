@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: projeto_paraiba
+      POSTGRES_USER: projeto
+      POSTGRES_PASSWORD: projeto
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U projeto -d projeto_paraiba"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: .
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    environment:
+      DJANGO_SECRET_KEY: dev-secret-key
+      DJANGO_DEBUG: "1"
+      DATABASE_URL: postgres://projeto:projeto@db:5432/projeto_paraiba
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
