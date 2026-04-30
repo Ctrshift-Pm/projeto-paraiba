@@ -1,6 +1,6 @@
-# Projeto Administrativo-Financeiro N2 - Etapa 1
+# Projeto Administrativo-Financeiro N2
 
-Aplicacao web em Django para upload de PDF de nota fiscal, extração dos dados com Gemini ou mock local, classificação automatica de despesa e exibição do JSON na tela.
+Aplicação web em Django para upload de PDF de nota fiscal, extração dos dados com Gemini ou mock local, classificação automatica de despesa e exibição do JSON na tela.
 
 ## Arquitetura com Agents
 
