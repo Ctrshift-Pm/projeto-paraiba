@@ -90,4 +90,4 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
