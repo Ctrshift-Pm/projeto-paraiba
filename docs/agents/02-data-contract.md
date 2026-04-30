@@ -46,7 +46,8 @@
 - Tipo de cada item em `produtos`: `{"descricao": string, "quantidade": number}`.
 - Tipo de cada item em `parcelas`: `{"numero": number, "data_vencimento": string, "valor": number}`.
 - Tipo de cada item em `classificacoes_despesa`: `{"categoria": string, "justificativa": string}`.
-- Para `GEMINI_API_KEY` ausente ou indisponível: retornar mock local compatível com o mesmo contrato.
+- Para `GEMINI_API_KEY` ausente ou falha diagnosticável do Gemini: retornar mock local compatível com o mesmo contrato.
+- Quando houver fallback mock, a resposta da API pode incluir metadado seguro `fallback_reason` fora do JSON de dados extraídos. Esse campo não deve conter segredos e deve indicar ausência de chave, chave inválida, modelo indisponível, resposta não JSON ou outro erro diagnosticável.
 - O Gemini deve ser instruido a retornar somente JSON valido, sem texto extra.
 - A saída final em `classificacoes_despesa` deve sempre utilizar categorias oficiais abaixo.
 

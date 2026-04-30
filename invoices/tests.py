@@ -161,6 +161,8 @@ class InvoiceExtractApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["provider"], "mock")
+        self.assertIn("fallback_reason", payload)
+        self.assertIn("Falha ao usar Gemini", payload["fallback_reason"])
 
     def test_api_returns_success_id_provider_and_data(self) -> None:
         response = self.post_pdf("Compra de óleo diesel")
@@ -256,6 +258,7 @@ class InvoiceExtractionServiceTests(TestCase):
             payload = service.extract(file)
 
         self.assertEqual(payload["provider"], "mock")
+        self.assertEqual(payload["fallback_reason"], "GEMINI_API_KEY nao foi configurada.")
         self.assertEqual(payload["data"]["classificacoes_despesa"][0]["categoria"], "MANUTENCAO E OPERACAO")
         self.assertEqual(payload["success"], True)
 
@@ -384,6 +387,58 @@ class InvoiceExtractionServiceTests(TestCase):
 
 
 class PdfExtractionAgentTests(TestCase):
+    @override_settings(GEMINI_API_KEY="")
+    def test_extract_without_gemini_key_uses_mock_with_missing_key_reason(self) -> None:
+        agent = PdfExtractionAgent()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+
+        with patch.object(agent, "_read_pdf_text", return_value="Nota Fiscal: Oleo Diesel S10"):
+            result = agent.extract(file)
+
+        self.assertEqual(result.provider, "mock")
+        self.assertEqual(result.fallback_reason, "GEMINI_API_KEY nao foi configurada.")
+        self.assertIn("fornecedor", result.data)
+
+    @override_settings(GEMINI_API_KEY="test-key")
+    def test_extract_with_gemini_key_and_valid_json_uses_gemini_without_fallback_reason(self) -> None:
+        agent = PdfExtractionAgent()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+        gemini_data = {
+            "fornecedor": {"razao_social": "FORNECEDORA GEMINI", "fantasia": "FORNECEDORA", "cnpj": "22.222.222/0002-22"},
+            "faturado": {"nome_completo": "CLIENTE GEMINI", "cpf": "333.333.333-33"},
+            "numero_nota_fiscal": "777",
+            "data_emissao": "2024-01-01",
+            "produtos": [{"descricao": "Material sem regra", "quantidade": 1}],
+            "parcelas": [{"numero": 1, "data_vencimento": "2024-02-01", "valor": 100.0}],
+            "valor_total": 100.0,
+            "classificacoes_despesa": [{"categoria": "MANUTENCAO E OPERACAO", "justificativa": "Classificacao oficial."}],
+        }
+
+        with patch.object(agent, "_read_pdf_text", return_value="Nota Fiscal Gemini"), \
+            patch.object(agent, "_extract_with_gemini", return_value=gemini_data) as mock_gemini:
+            result = agent.extract(file)
+
+        mock_gemini.assert_called_once_with("Nota Fiscal Gemini")
+        self.assertEqual(result.provider, "gemini")
+        self.assertIsNone(result.fallback_reason)
+        self.assertEqual(result.data, gemini_data)
+
+    @override_settings(GEMINI_API_KEY="test-key")
+    def test_extract_with_gemini_failure_uses_mock_with_safe_fallback_reason(self) -> None:
+        agent = PdfExtractionAgent()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+
+        with patch.object(agent, "_read_pdf_text", return_value="Nota Fiscal: filtro hidraulico"), \
+            patch.object(agent, "_extract_with_gemini", side_effect=RuntimeError("modelo indisponivel para test-key")):
+            result = agent.extract(file)
+
+        self.assertEqual(result.provider, "mock")
+        self.assertIsNotNone(result.fallback_reason)
+        self.assertIn("Falha ao usar Gemini", result.fallback_reason)
+        self.assertIn("modelo indisponivel", result.fallback_reason)
+        self.assertNotIn("test-key", result.fallback_reason)
+        self.assertIn("fornecedor", result.data)
+
     def test_read_real_pdf_with_pypdf(self) -> None:
         pdf_path = Path(r"C:\Users\pmgam\Downloads\danfe (beltrano - insumos).pdf")
         if not pdf_path.exists():

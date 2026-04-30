@@ -14,6 +14,7 @@ from pypdf import PdfReader
 class ExtractionResult:
     data: dict
     provider: str
+    fallback_reason: str | None = None
 
 
 class PdfExtractionAgent:
@@ -27,16 +28,25 @@ class PdfExtractionAgent:
         return self._read_pdf_text(uploaded_file)
 
     def _process_and_interpret(self, pdf_text: str) -> ExtractionResult:
-        if settings.GEMINI_API_KEY:
+        gemini_api_key = str(getattr(settings, "GEMINI_API_KEY", "") or "").strip()
+        if gemini_api_key:
             try:
                 return ExtractionResult(
                     data=self._extract_with_gemini(pdf_text),
                     provider="gemini",
                 )
-            except Exception:
-                return ExtractionResult(data=self._mock_data(pdf_text), provider="mock")
+            except Exception as exc:
+                return ExtractionResult(
+                    data=self._mock_data(pdf_text),
+                    provider="mock",
+                    fallback_reason=self._safe_fallback_reason(exc),
+                )
 
-        return ExtractionResult(data=self._mock_data(pdf_text), provider="mock")
+        return ExtractionResult(
+            data=self._mock_data(pdf_text),
+            provider="mock",
+            fallback_reason="GEMINI_API_KEY nao foi configurada.",
+        )
 
     def _read_pdf_text(self, uploaded_file) -> str:
         uploaded_file.seek(0)
@@ -128,6 +138,15 @@ Regras:
             raise ValueError("Gemini nao retornou objeto JSON.")
 
         return parsed
+
+    def _safe_fallback_reason(self, exc: Exception) -> str:
+        message = str(exc).strip() or exc.__class__.__name__
+        gemini_api_key = str(getattr(settings, "GEMINI_API_KEY", "") or "").strip()
+        if gemini_api_key:
+            message = message.replace(gemini_api_key, "[redacted]")
+        message = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[redacted]", message)
+        message = re.sub(r"\s+", " ", message)[:240]
+        return f"Falha ao usar Gemini ({exc.__class__.__name__}): {message}"
 
     def _mock_data(self, pdf_text: str) -> dict:
         lowered = pdf_text.lower()

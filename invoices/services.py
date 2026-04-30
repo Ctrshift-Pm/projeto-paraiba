@@ -31,12 +31,15 @@ class InvoiceExtractionService:
         # Agir: garantir contrato final e persistir o resultado estruturado.
         data = self.validation_agent.normalize(data)
         record = self.persistence_agent.save_success(uploaded_file, data, extraction.provider)
-        return {
+        payload = {
             "success": True,
             "id": record.id,
             "provider": extraction.provider,
             "data": data,
         }
+        if extraction.fallback_reason:
+            payload["fallback_reason"] = extraction.fallback_reason
+        return payload
 
     def _should_preserve_gemini_classification(self, raw_data: object) -> bool:
         if not isinstance(raw_data, Mapping):
