@@ -306,9 +306,12 @@ svg {
   background: var(--dark-bar);
 }
 
+.data-card.invoice,
+.data-card.totals,
 .data-card.products,
 .data-card.installments,
-.data-card.classification {
+.data-card.classification,
+.data-card.additional {
   grid-column: 1 / -1;
 }
 
@@ -322,6 +325,10 @@ svg {
 
 .data-card.classification::before {
   background: var(--yellow-bar);
+}
+
+.data-card.totals::before {
+  background: var(--blue-bar);
 }
 
 .data-card-header {
@@ -340,8 +347,17 @@ svg {
 
 .data-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 13px;
+}
+
+.data-card.invoice .data-grid,
+.data-card.totals .data-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.data-card.additional .data-grid {
+  grid-template-columns: 1fr;
 }
 
 .data-row {
@@ -372,7 +388,7 @@ svg {
 
 .data-table {
   width: 100%;
-  min-width: 720px;
+  min-width: 920px;
   border-collapse: collapse;
   font-size: 15px;
 }
@@ -506,6 +522,12 @@ svg {
   }
 
   .formatted-view {
+    grid-template-columns: 1fr;
+  }
+
+  .data-grid,
+  .data-card.invoice .data-grid,
+  .data-card.totals .data-grid {
     grid-template-columns: 1fr;
   }
 

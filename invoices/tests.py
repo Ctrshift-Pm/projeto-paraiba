@@ -453,6 +453,28 @@ class PdfExtractionAgentTests(TestCase):
         self.assertIsInstance(extracted_text, str)
         self.assertGreater(len(extracted_text.strip()), 0)
 
+    def test_mock_data_extracts_due_date_only_when_label_is_explicit(self) -> None:
+        agent = PdfExtractionAgent()
+        pdf_text = """
+        Data de vencimento: 05/05/2025
+        """
+
+        result = agent._mock_data(pdf_text)
+
+        self.assertEqual(result["parcelas"][0]["data_vencimento"], "2025-05-05")
+
+    def test_mock_data_keeps_due_date_empty_without_explicit_label(self) -> None:
+        agent = PdfExtractionAgent()
+        pdf_text = """
+        FATURA/DUPLICATAS
+        001: 05/05/2025 R$163.520,00;
+        CÁLCULO DO IMPOSTO
+        """
+
+        result = agent._mock_data(pdf_text)
+
+        self.assertEqual(result["parcelas"][0]["data_vencimento"], "")
+
     def test_gemini_prompt_targets_danfe_and_official_categories(self) -> None:
         agent = PdfExtractionAgent()
         prompt = agent._prompt("Documento de teste DANFE com produtos de insumos agrícolas")
@@ -461,8 +483,11 @@ class PdfExtractionAgentTests(TestCase):
         self.assertIn("fornecedor", prompt)
         self.assertIn("faturado", prompt)
         self.assertIn("numero_nota_fiscal", prompt)
+        self.assertIn("chave_acesso", prompt)
+        self.assertIn("transportador", prompt)
+        self.assertIn("valor_icms", prompt)
         self.assertIn("classificacoes_despesa", prompt)
-        self.assertIn("duplicatas", prompt)
+        self.assertIn("vencimento", prompt.lower())
         self.assertIn("INSUMOS AGRICOLAS", prompt)
         self.assertIn("classifique", prompt.lower())
         self.assertIn("somente json", prompt.lower())
@@ -531,6 +556,86 @@ class ValidationAgentTests(TestCase):
         self.assertIsInstance(normalized["parcelas"], list)
         self.assertIsInstance(normalized["classificacoes_despesa"], list)
         self.assertEqual(normalized["classificacoes_despesa"][0]["categoria"], "MANUTENCAO E OPERACAO")
+
+    def test_validation_preserves_important_danfe_fields(self) -> None:
+        normalized = self.validator.normalize(
+            {
+                "fornecedor": {
+                    "razao_social": "Fornecedor Completo",
+                    "fantasia": "Fornecedor",
+                    "cnpj": "00.000.000/0001-00",
+                    "ie": "123456789",
+                    "logradouro": "Rua Fiscal",
+                    "numero": "10",
+                    "bairro": "Centro",
+                    "cidade": "Joao Pessoa",
+                    "uf": "PB",
+                    "cep": "58000-000",
+                },
+                "destinatario": {
+                    "nome": "Cliente Completo",
+                    "cpf": "123.456.789-00",
+                    "logradouro": "Avenida Cliente",
+                    "numero": "20",
+                    "cidade": "Campina Grande",
+                    "uf": "PB",
+                },
+                "numero": "123",
+                "serie": "1",
+                "chave_de_acesso": "25240112345678000190550010001234561000000010",
+                "natureza_da_operacao": "Venda",
+                "protocolo": "325240000000000",
+                "dataEmissao": "2024-01-01",
+                "data_saida": "2024-01-01",
+                "hora_saida": "10:30:00",
+                "itens": [
+                    {
+                        "codigo_produto": "001",
+                        "item": "Fungicida agricola",
+                        "ncm": "38089291",
+                        "cst": "060",
+                        "cfop": "5102",
+                        "un": "UN",
+                        "qtd": "2",
+                        "valor_unit": "100,00",
+                        "total": "200,00",
+                    }
+                ],
+                "parcelas": {"parcela": 1, "duplicata": "001", "vencimento": "2024-02-01", "valor_total": "200,00"},
+                "valorTotal": "200,00",
+                "valor_total_produtos": "200,00",
+                "bc_icms": "200,00",
+                "icms": "36,00",
+                "entrega": {"nome": "Local Entrega", "cnpj": "11.111.111/0001-11", "cidade": "Sousa", "uf": "PB"},
+                "transporte": {
+                    "transportador": "Transportadora",
+                    "cnpj": "22.222.222/0001-22",
+                    "placa": "ABC1D23",
+                    "modalidade_frete": "Emitente",
+                    "peso_bruto": "10 KG",
+                },
+                "informacoes_adicionais": "Dados adicionais da nota.",
+                "classificacoes_despesa": [{"categoria": "INSUMOS AGRICOLAS", "justificativa": "Produto agricola."}],
+            }
+        )
+
+        self.assertEqual(normalized["fornecedor"]["inscricao_estadual"], "123456789")
+        self.assertEqual(normalized["fornecedor"]["endereco"], "Rua Fiscal")
+        self.assertEqual(normalized["faturado"]["municipio"], "Campina Grande")
+        self.assertEqual(normalized["serie"], "1")
+        self.assertEqual(normalized["chave_acesso"], "25240112345678000190550010001234561000000010")
+        self.assertEqual(normalized["natureza_operacao"], "Venda")
+        self.assertEqual(normalized["protocolo_autorizacao"], "325240000000000")
+        self.assertEqual(normalized["produtos"][0]["codigo"], "001")
+        self.assertEqual(normalized["produtos"][0]["ncm"], "38089291")
+        self.assertEqual(normalized["produtos"][0]["cfop"], "5102")
+        self.assertEqual(normalized["produtos"][0]["valor_unitario"], 100.0)
+        self.assertEqual(normalized["parcelas"][0]["descricao"], "001")
+        self.assertEqual(normalized["valor_produtos"], 200.0)
+        self.assertEqual(normalized["valor_icms"], 36.0)
+        self.assertEqual(normalized["local_entrega"]["municipio"], "Sousa")
+        self.assertEqual(normalized["transportador"]["razao_social"], "Transportadora")
+        self.assertEqual(normalized["informacoes_complementares"], "Dados adicionais da nota.")
 
     def test_validation_rejects_invalid_classification_shape(self) -> None:
         invalid_data = {

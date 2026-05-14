@@ -40,11 +40,12 @@
 
 ## Regras de conformidade (Etapa 1)
 
-- Saida obrigatoria: o JSON deve conter **apenas** os campos do contrato acima em nível superior.
 - Campos obrigatorios: `fornecedor`, `faturado`, `numero_nota_fiscal`, `data_emissao`, `produtos`, `parcelas`, `valor_total`, `classificacoes_despesa`.
+- Campos importantes de DANFE/NF-e devem ser preservados quando existirem: `serie`, `chave_acesso`, `natureza_operacao`, `protocolo_autorizacao`, datas/horarios, totais/impostos, `local_entrega`, `transportador` e `informacoes_complementares`.
+- `fornecedor` e `faturado` podem incluir dados cadastrais adicionais: inscrição estadual, endereço, número, bairro, município, UF, CEP e telefone.
 - Listas sempre devem ser retornadas para `produtos`, `parcelas` e `classificacoes_despesa` (mesmo com apenas 1 elemento).
-- Tipo de cada item em `produtos`: `{"descricao": string, "quantidade": number}`.
-- Tipo de cada item em `parcelas`: `{"numero": number, "data_vencimento": string, "valor": number}`.
+- Tipo mínimo de cada item em `produtos`: `{"descricao": string, "quantidade": number}`; quando houver, preservar também código, NCM, CST/CSOSN, CFOP, unidade, valor unitário e valor total.
+- Tipo mínimo de cada item em `parcelas`: `{"numero": number, "data_vencimento": string, "valor": number}`; quando houver, preservar também documento/descrição da duplicata.
 - Tipo de cada item em `classificacoes_despesa`: `{"categoria": string, "justificativa": string}`.
 - Para `GEMINI_API_KEY` ausente ou falha diagnosticável do Gemini: retornar mock local compatível com o mesmo contrato.
 - Quando houver fallback mock, a resposta da API pode incluir metadado seguro `fallback_reason` fora do JSON de dados extraídos. Esse campo não deve conter segredos e deve indicar ausência de chave, chave inválida, modelo indisponível, resposta não JSON ou outro erro diagnosticável.

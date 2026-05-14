@@ -19,9 +19,7 @@ class ExtractionResult:
 
 class PdfExtractionAgent:
     def extract(self, uploaded_file) -> ExtractionResult:
-        # Perceber: ler e normalizar texto bruto da DANFE/NF-e.
         pdf_text = self._perceive(uploaded_file)
-        # Processar/Interpretar: quando houver chave, inferir com Gemini; caso contrario usar mock local.
         return self._process_and_interpret(pdf_text)
 
     def _perceive(self, uploaded_file) -> str:
@@ -79,12 +77,25 @@ class PdfExtractionAgent:
         contract = """
 Formato esperado do contrato (apenas JSON):
 {
-  "fornecedor": {"razao_social":"", "fantasia":"", "cnpj":""},
-  "faturado": {"nome_completo":"", "cpf":""},
-  "numero_nota_fiscal":"", "data_emissao":"YYYY-MM-DD",
-  "produtos":[{"descricao":"", "quantidade":0}],
-  "parcelas":[{"numero":1, "data_vencimento":"YYYY-MM-DD", "valor":0.0}],
+  "fornecedor": {
+    "razao_social":"", "fantasia":"", "cnpj":"", "inscricao_estadual":"",
+    "endereco":"", "numero":"", "bairro":"", "municipio":"", "uf":"", "cep":"", "telefone":""
+  },
+  "faturado": {
+    "nome_completo":"", "cpf":"", "cnpj":"", "inscricao_estadual":"",
+    "endereco":"", "numero":"", "bairro":"", "municipio":"", "uf":"", "cep":"", "telefone":""
+  },
+  "numero_nota_fiscal":"", "serie":"", "chave_acesso":"", "natureza_operacao":"",
+  "protocolo_autorizacao":"", "data_emissao":"YYYY-MM-DD", "data_saida_entrada":"YYYY-MM-DD", "hora_saida":"",
+  "produtos":[{"codigo":"", "descricao":"", "ncm":"", "cst":"", "cfop":"", "unidade":"", "quantidade":0, "valor_unitario":0.0, "valor_total":0.0}],
+  "parcelas":[{"numero":1, "descricao":"", "data_vencimento":"YYYY-MM-DD", "valor":0.0}],
   "valor_total":0.0,
+  "valor_produtos":0.0, "valor_frete":0.0, "valor_desconto":0.0, "valor_seguro":0.0, "outras_despesas":0.0,
+  "base_calculo_icms":0.0, "valor_icms":0.0, "base_calculo_icms_st":0.0, "valor_icms_st":0.0,
+  "valor_ipi":0.0, "valor_pis":0.0, "valor_cofins":0.0,
+  "local_entrega": {"nome_razao_social":"", "cpf_cnpj":"", "inscricao_estadual":"", "endereco":"", "numero":"", "bairro":"", "municipio":"", "uf":"", "cep":"", "telefone":""},
+  "transportador": {"razao_social":"", "cpf_cnpj":"", "inscricao_estadual":"", "endereco":"", "municipio":"", "uf":"", "placa_veiculo":"", "frete_por_conta":"", "quantidade":"", "especie":"", "peso_bruto":"", "peso_liquido":""},
+  "informacoes_complementares":"",
   "classificacoes_despesa":[{"categoria":"", "justificativa":""}]
 }
 """
@@ -98,10 +109,13 @@ Regras:
 - Extrair campo em `fornecedor` como emitente da nota.
 - Extrair campo em `faturado` como destinatário.
 - Extrair `numero_nota_fiscal` da NF-e (NÚMERO DA NOTA).
+- Extrair serie, chave de acesso, natureza da operação, protocolo/autorização, datas e horários quando estiverem no DANFE.
 - Extrair `data_emissao` no formato `YYYY-MM-DD` sempre que possivel.
-- Extrair `produtos` a partir de itens da nota fiscal (descricao e quantidade).
-- Extrair `parcelas` com os dados de vencimento (duplicatas/parcelas).
-- Extrair `valor_total` com valor da nota.
+- Extrair dados cadastrais completos de fornecedor/faturado quando existirem: CNPJ/CPF, IE, endereço, bairro, município, UF, CEP e telefone.
+- Extrair `produtos` a partir de itens da nota fiscal: código, descrição, NCM, CST/CSOSN, CFOP, unidade, quantidade, valor unitário e valor total.
+- Extrair `parcelas` com os dados de vencimento somente quando a data estiver explicitamente identificada como `vencimento`/`vencto` no documento; se não estiver explícito, deixe `data_vencimento` vazia.
+- Extrair `valor_total` com valor da nota e também totais/impostos: produtos, frete, desconto, seguro, outras despesas, base/valor ICMS, ICMS ST, IPI, PIS e COFINS.
+- Extrair local de entrega, transportador/volumes e informações complementares quando existirem.
 - DESPESA não é campo literal da nota e TipoDespesa também não deve ser copiado literal: classifique conforme os `produtos` identificados.
 - Use listas para produtos, parcelas e classificacoes_despesa, mesmo com 1 item.
 - Classificar despesa usando apenas as categorias oficiais:
@@ -151,31 +165,126 @@ Regras:
     def _mock_data(self, pdf_text: str) -> dict:
         lowered = pdf_text.lower()
         product = "Oleo Diesel S10" if "diesel" in lowered or not lowered else "Material Hidraulico"
+        due_date = self._extract_due_date(pdf_text)
         return {
             "fornecedor": {
                 "razao_social": "EMPRESA FORNECEDORA LTDA",
                 "fantasia": "FORNECEDORA",
                 "cnpj": "12.345.678/0001-90",
+                "inscricao_estadual": "123.456.789.012",
+                "endereco": "Rua das Empresas",
+                "numero": "100",
+                "bairro": "Centro",
+                "municipio": "Joao Pessoa",
+                "uf": "PB",
+                "cep": "58000-000",
+                "telefone": "(83) 3333-0000",
             },
             "faturado": {
                 "nome_completo": "CLIENTE EXEMPLO",
                 "cpf": "123.456.789-00",
+                "cnpj": "",
+                "inscricao_estadual": "",
+                "endereco": "Avenida Cliente",
+                "numero": "200",
+                "bairro": "Bairro Exemplo",
+                "municipio": "Campina Grande",
+                "uf": "PB",
+                "cep": "58400-000",
+                "telefone": "",
             },
             "numero_nota_fiscal": "000123456",
+            "serie": "1",
+            "chave_acesso": "25240112345678000190550010001234561000000010",
+            "natureza_operacao": "VENDA DE MERCADORIA",
+            "protocolo_autorizacao": "325240000000000",
             "data_emissao": "2024-01-15",
+            "data_saida_entrada": "2024-01-15",
+            "hora_saida": "10:30:00",
             "produtos": [
                 {
+                    "codigo": "001",
                     "descricao": product,
+                    "ncm": "27101921" if "diesel" in product.lower() else "39174090",
+                    "cst": "060",
+                    "cfop": "5102",
+                    "unidade": "L" if "diesel" in product.lower() else "UN",
                     "quantidade": 100,
+                    "valor_unitario": 15.0,
+                    "valor_total": 1500.0,
                 }
             ],
             "parcelas": [
                 {
                     "numero": 1,
-                    "data_vencimento": "2024-02-15",
+                    "descricao": "Duplicata 001",
+                    "data_vencimento": due_date,
                     "valor": 1500.0,
                 }
             ],
             "valor_total": 1500.0,
+            "valor_produtos": 1500.0,
+            "valor_frete": 0.0,
+            "valor_desconto": 0.0,
+            "valor_seguro": 0.0,
+            "outras_despesas": 0.0,
+            "base_calculo_icms": 1500.0,
+            "valor_icms": 270.0,
+            "base_calculo_icms_st": 0.0,
+            "valor_icms_st": 0.0,
+            "valor_ipi": 0.0,
+            "valor_pis": 0.0,
+            "valor_cofins": 0.0,
+            "local_entrega": {
+                "nome_razao_social": "CLIENTE EXEMPLO",
+                "cpf_cnpj": "123.456.789-00",
+                "inscricao_estadual": "",
+                "endereco": "Avenida Cliente",
+                "numero": "200",
+                "bairro": "Bairro Exemplo",
+                "municipio": "Campina Grande",
+                "uf": "PB",
+                "cep": "58400-000",
+                "telefone": "",
+            },
+            "transportador": {
+                "razao_social": "TRANSPORTE EXEMPLO LTDA",
+                "cpf_cnpj": "98.765.432/0001-10",
+                "inscricao_estadual": "987.654.321.000",
+                "endereco": "Rua do Transporte",
+                "municipio": "Joao Pessoa",
+                "uf": "PB",
+                "placa_veiculo": "ABC1D23",
+                "frete_por_conta": "Emitente",
+                "quantidade": "1",
+                "especie": "Volume",
+                "peso_bruto": "100,000 KG",
+                "peso_liquido": "98,000 KG",
+            },
+            "informacoes_complementares": "Documento gerado em modo demonstrativo quando Gemini nao esta disponivel.",
             "classificacoes_despesa": [],
         }
+
+    def _extract_due_date(self, pdf_text: str) -> str:
+        patterns = (
+            r"\b(?:data\s+de\s+)?(?:vencimento|vencto\.?|vcto\.?)\b\D{0,40}(\d{2}[/-]\d{2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, pdf_text, re.IGNORECASE | re.DOTALL)
+            if match:
+                return self._normalize_date(match.group(1))
+        return ""
+
+    def _normalize_date(self, raw_date: str) -> str:
+        value = str(raw_date).strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return value
+
+        match = re.fullmatch(r"(\d{2})[/-](\d{2})[/-](\d{2,4})", value)
+        if not match:
+            return ""
+
+        day, month, year = match.groups()
+        if len(year) == 2:
+            year = f"20{year}"
+        return f"{year}-{month}-{day}"

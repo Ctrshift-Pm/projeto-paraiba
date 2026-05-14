@@ -187,37 +187,115 @@ function renderProvider(provider, fallbackReason = "") {
 function renderFormatted(data) {
   const fornecedor = data.fornecedor || {};
   const faturado = data.faturado || {};
+  const localEntrega = data.local_entrega || {};
+  const transportador = data.transportador || {};
   const produtos = Array.isArray(data.produtos) ? data.produtos : [];
   const parcelas = Array.isArray(data.parcelas) ? data.parcelas : [];
   const classificacoes = Array.isArray(data.classificacoes_despesa) ? data.classificacoes_despesa : [];
 
-  formattedView.innerHTML = [
+  const cards = [
     card("Fornecedor", [
       ["Razão Social", fornecedor.razao_social],
       ["Nome Fantasia", fornecedor.fantasia],
       ["CNPJ", fornecedor.cnpj],
+      ["Inscrição Estadual", fornecedor.inscricao_estadual],
+      ["Endereço", joinAddress(fornecedor)],
+      ["Bairro", fornecedor.bairro],
+      ["Município/UF", joinCityState(fornecedor)],
+      ["CEP", fornecedor.cep],
+      ["Telefone", fornecedor.telefone],
     ], "supplier"),
     card("Faturado", [
-      ["Nome Completo", faturado.nome_completo],
+      ["Nome/Razão Social", faturado.nome_completo || faturado.razao_social],
       ["CPF", faturado.cpf],
       ["CNPJ", faturado.cnpj],
+      ["Inscrição Estadual", faturado.inscricao_estadual],
+      ["Endereço", joinAddress(faturado)],
+      ["Bairro", faturado.bairro],
+      ["Município/UF", joinCityState(faturado)],
+      ["CEP", faturado.cep],
+      ["Telefone", faturado.telefone],
     ], "billed", "yellow"),
     card("Nota Fiscal", [
       ["Número", data.numero_nota_fiscal],
+      ["Série", data.serie],
+      ["Chave de Acesso", data.chave_acesso],
+      ["Natureza da Operação", data.natureza_operacao],
+      ["Protocolo de Autorização", data.protocolo_autorizacao],
       ["Data de Emissão", data.data_emissao],
+      ["Data Saída/Entrada", data.data_saida_entrada],
+      ["Hora Saída", data.hora_saida],
+      ["Vencimento", primaryDueDate(parcelas)],
       ["Valor Total", currency(data.valor_total)],
     ], "invoice"),
+    card("Totais e Impostos", [
+      ["Valor dos Produtos", currency(data.valor_produtos)],
+      ["Valor do Frete", currency(data.valor_frete)],
+      ["Desconto", currency(data.valor_desconto)],
+      ["Seguro", currency(data.valor_seguro)],
+      ["Outras Despesas", currency(data.outras_despesas)],
+      ["Base ICMS", currency(data.base_calculo_icms)],
+      ["Valor ICMS", currency(data.valor_icms)],
+      ["Base ICMS ST", currency(data.base_calculo_icms_st)],
+      ["Valor ICMS ST", currency(data.valor_icms_st)],
+      ["Valor IPI", currency(data.valor_ipi)],
+      ["Valor PIS", currency(data.valor_pis)],
+      ["Valor COFINS", currency(data.valor_cofins)],
+    ], "totals"),
     productsCard(produtos),
     installmentsCard(parcelas),
     classificationCard(classificacoes),
-  ].join("");
+  ];
+
+  if (hasAnyObjectValue(localEntrega)) {
+    cards.splice(4, 0, card("Local de Entrega", [
+      ["Nome/Razão Social", localEntrega.nome_razao_social],
+      ["CPF/CNPJ", localEntrega.cpf_cnpj],
+      ["Inscrição Estadual", localEntrega.inscricao_estadual],
+      ["Endereço", joinAddress(localEntrega)],
+      ["Bairro", localEntrega.bairro],
+      ["Município/UF", joinCityState(localEntrega)],
+      ["CEP", localEntrega.cep],
+      ["Telefone", localEntrega.telefone],
+    ], "delivery", "green"));
+  }
+
+  if (hasAnyObjectValue(transportador)) {
+    cards.splice(5, 0, card("Transportador/Volumes", [
+      ["Razão Social", transportador.razao_social],
+      ["CPF/CNPJ", transportador.cpf_cnpj],
+      ["Inscrição Estadual", transportador.inscricao_estadual],
+      ["Endereço", transportador.endereco],
+      ["Município/UF", joinCityState(transportador)],
+      ["Placa", transportador.placa_veiculo],
+      ["Frete por Conta", transportador.frete_por_conta],
+      ["Quantidade", transportador.quantidade],
+      ["Espécie", transportador.especie],
+      ["Peso Bruto", transportador.peso_bruto],
+      ["Peso Líquido", transportador.peso_liquido],
+    ], "carrier", "rose"));
+  }
+
+  if (hasValue(data.informacoes_complementares)) {
+    cards.push(card("Informações Complementares", [
+      ["Descrição", data.informacoes_complementares],
+    ], "additional", "dark"));
+  }
+
+  formattedView.innerHTML = cards.join("");
 }
 
 function card(title, rows, className = "", bar = "") {
   const renderedRows = rows
     .map(([label, value]) => dataRow(label, value))
     .join("");
-  const style = bar === "yellow" ? ' style="--card-bar: var(--yellow-bar)"' : "";
+  const cardBars = {
+    yellow: "var(--yellow-bar)",
+    green: "var(--green-bar)",
+    rose: "var(--rose-bar)",
+    dark: "var(--dark-bar)",
+  };
+  const style = cardBars[bar] ? ` style="--card-bar: ${cardBars[bar]}"` : "";
 
   return `
     <article class="data-card ${escapeHtml(className)}"${style}>
@@ -231,7 +309,11 @@ function productsCard(produtos) {
   const rows = produtos.map((item, index) => `
     <tr>
       <td>${escapeHtml(index + 1)}</td>
+      <td>${escapeHtml(item.codigo || "-")}</td>
       <td>${escapeHtml(item.descricao || item.nome || "-")}</td>
+      <td>${escapeHtml(item.ncm || "-")}</td>
+      <td>${escapeHtml(item.cst || "-")}</td>
+      <td>${escapeHtml(item.cfop || "-")}</td>
       <td>${escapeHtml(item.quantidade ?? "-")}</td>
       <td>${escapeHtml(item.unidade || "-")}</td>
       <td>${escapeHtml(currency(item.valor_unitario))}</td>
@@ -239,19 +321,20 @@ function productsCard(produtos) {
     </tr>
   `).join("");
 
-  return tableCard("Produtos/Serviços", "products", ["#", "Descrição", "Qtd.", "Unidade", "Valor Unit.", "Total"], rows);
+  return tableCard("Produtos/Serviços", "products", ["#", "Código", "Descrição", "NCM", "CST", "CFOP", "Qtd.", "Unidade", "Valor Unit.", "Total"], rows);
 }
 
 function installmentsCard(parcelas) {
   const rows = parcelas.map((item) => `
     <tr>
       <td>${escapeHtml(item.numero ?? "-")}</td>
-      <td>${escapeHtml(item.data_vencimento || "-")}</td>
+      <td>${escapeHtml(item.descricao || "-")}</td>
+      <td>${escapeHtml(dueDateLabel(item.data_vencimento))}</td>
       <td>${escapeHtml(currency(item.valor))}</td>
     </tr>
   `).join("");
 
-  return tableCard("Parcelas", "installments", ["Parcela", "Vencimento", "Valor"], rows);
+  return tableCard("Parcelas", "installments", ["Parcela", "Documento", "Vencimento", "Valor"], rows);
 }
 
 function classificationCard(classificacoes) {
@@ -310,6 +393,28 @@ function currency(value) {
 
 function hasValue(value) {
   return value !== null && value !== undefined && value !== "";
+}
+
+function hasAnyObjectValue(value) {
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value).some((item) => hasValue(item));
+}
+
+function primaryDueDate(parcelas) {
+  const firstWithDueDate = parcelas.find((item) => hasValue(item?.data_vencimento));
+  return dueDateLabel(firstWithDueDate?.data_vencimento);
+}
+
+function dueDateLabel(value) {
+  return hasValue(value) ? value : "Não tem";
+}
+
+function joinAddress(value) {
+  return [value.endereco, value.numero].filter(hasValue).join(", ");
+}
+
+function joinCityState(value) {
+  return [value.municipio, value.uf].filter(hasValue).join(" / ");
 }
 
 function escapeHtml(value) {
