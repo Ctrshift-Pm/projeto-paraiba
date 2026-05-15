@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,7 +11,7 @@ from invoices.agents.extraction import ExtractionResult
 from invoices.agents import ExpenseClassificationAgent, ValidationAgent
 from invoices.agents.extraction import PdfExtractionAgent
 from invoices.services import InvoiceExtractionService
-from invoices.models import InvoiceExtraction
+from invoices.models import Classificacao, InvoiceExtraction, MovimentoContas, ParcelaContas, Pessoa
 
 
 MINIMUM_CONTRACT_FIELDS = (
@@ -176,6 +176,61 @@ class InvoiceExtractApiTests(TestCase):
         self.assertTrue(payload["success"])
         self.assertIsInstance(payload["id"], int)
 
+    def test_extract_then_analyze_then_launch_flow(self) -> None:
+        response = self.post_pdf("Compra de Oleo Diesel S10")
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("analysis", payload)
+        self.assertNotIn("launch", payload)
+        analysis_response = self.client.post(reverse("invoices:analyze_invoice", args=[payload["id"]]))
+        analysis_payload = analysis_response.json()
+
+        self.assertEqual(analysis_response.status_code, 200)
+        self.assertFalse(analysis_payload["analysis"]["fornecedor"]["exists"])
+        self.assertFalse(analysis_payload["analysis"]["faturado"]["exists"])
+        self.assertFalse(analysis_payload["analysis"]["classificacoes"][0]["exists"])
+
+        launch_response = self.client.post(reverse("invoices:launch_invoice", args=[payload["id"]]))
+        launch_payload = launch_response.json()
+
+        self.assertEqual(launch_response.status_code, 200)
+        self.assertIn("launch", launch_payload)
+        self.assertEqual(launch_payload["launch"]["message"], "Lancamentos concluidos com sucesso.")
+        self.assertTrue(len(launch_payload["launch"]["movements"]) >= 1)
+        self.assertEqual(launch_payload["launch"]["movements"][0]["movement_type"], "APAGAR")
+        self.assertIn("fornecedor", launch_payload["launch"])
+        self.assertIn("faturado", launch_payload["launch"])
+        self.assertIn("classificacoes", launch_payload["launch"])
+        self.assertIn("parcelas", launch_payload["launch"])
+        self.assertIsInstance(launch_payload["launch"]["fornecedor"]["id"], int)
+        self.assertIsInstance(launch_payload["launch"]["faturado"]["id"], int)
+        self.assertIn("nome", launch_payload["launch"]["fornecedor"])
+        self.assertIn("documento", launch_payload["launch"]["fornecedor"])
+        self.assertIn("nome", launch_payload["launch"]["faturado"])
+        self.assertIn("documento", launch_payload["launch"]["faturado"])
+        self.assertIsInstance(launch_payload["launch"]["classificacoes"][0]["descricao"], str)
+        self.assertIsInstance(launch_payload["launch"]["parcelas"][0]["id"], int)
+        self.assertIn("identificacao", launch_payload["launch"]["parcelas"][0])
+        self.assertIn("numero", launch_payload["launch"]["parcelas"][0])
+        self.assertIn("vencimento", launch_payload["launch"]["parcelas"][0])
+        self.assertIn("valor", launch_payload["launch"]["parcelas"][0])
+
+    def test_launch_can_be_executed_without_explicit_prior_analyze(self) -> None:
+        response = self.post_pdf("Compra de Oleo Diesel S10")
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        launch_response = self.client.post(reverse("invoices:launch_invoice", args=[payload["id"]]))
+        launch_payload = launch_response.json()
+
+        self.assertEqual(launch_response.status_code, 200)
+        self.assertTrue(launch_payload["success"])
+        self.assertIn(launch_payload["movement_type"], {MovimentoContas.Tipo.APAGAR, MovimentoContas.Tipo.ARECEBER, "MISTO"})
+        self.assertEqual(launch_payload["launch"]["movements"][0]["movement_type"], "APAGAR")
+        self.assertIn("fornecedor", launch_payload["launch"])
+        self.assertIn("faturado", launch_payload["launch"])
+
     @patch("invoices.services.PdfExtractionAgent.extract", side_effect=ValueError("Nao foi possivel extrair texto do PDF enviado."))
     def test_extract_pdf_without_readable_text_returns_400(self, _mock_read) -> None:
         response = self.client.post(
@@ -249,6 +304,268 @@ class InvoiceExtractApiTests(TestCase):
 
 
 class InvoiceExtractionServiceTests(TestCase):
+    @staticmethod
+    def _payload_with_installments_and_classifications(*, movement_type: str = MovimentoContas.Tipo.APAGAR) -> dict:
+        return {
+            "fornecedor": {
+                "razao_social": "FORNECEDORA AGRI",
+                "fantasia": "AGRI FORNECEDORA",
+                "cnpj": "99.999.999/0001-99",
+            },
+            "faturado": {"nome_completo": "CLIENTE EXEMPLO", "cpf": "123.456.789-00"},
+            "numero_nota_fiscal": "NF-9001",
+            "data_emissao": "2024-01-15",
+            "produtos": [
+                {"descricao": "Oleo Diesel S10", "quantidade": 1},
+                {"descricao": "Fertilizante ureia", "quantidade": 2},
+            ],
+            "parcelas": [
+                {"numero": 1, "data_vencimento": "", "valor": 400.0},
+                {"numero": 2, "data_vencimento": "2024-03-15", "valor": 600.0},
+            ],
+            "valor_total": 1000.0,
+            "classificacoes_despesa": [
+                {"categoria": "MANUTENCAO E OPERACAO", "justificativa": "Importada do Gemini."},
+            ]
+            if movement_type == MovimentoContas.Tipo.APAGAR
+            else [
+                {"categoria": "PROVENTOS", "justificativa": "Receita operacional mensal."},
+                {"categoria": "VENDAS", "justificativa": "Faturamento recorrente."},
+            ],
+        }
+
+    def test_extract_creates_financial_movement_with_multiple_installments_and_classifications(self) -> None:
+        service = InvoiceExtractionService()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+
+        with patch.object(service.pdf_agent, "extract", return_value=ExtractionResult(data=self._payload_with_installments_and_classifications(), provider="gemini")):
+            payload = service.extract(file)
+
+        service.analyze(payload["id"])
+        launch = service.launch(payload["id"])
+        movement = MovimentoContas.objects.get(id=launch["launch"]["movements"][0]["movement_id"])
+        self.assertEqual(launch["launch"]["movements"][0]["movement_type"], MovimentoContas.Tipo.APAGAR)
+        self.assertEqual(movement.tipo, MovimentoContas.Tipo.APAGAR)
+        self.assertEqual(movement.classificacoes.count(), 1)
+        self.assertEqual(movement.parcelas.count(), 2)
+        self.assertEqual(movement.parcelas.first().numero, 1)
+        self.assertIn("fornecedor", launch["launch"])
+        self.assertIn("faturado", launch["launch"])
+        self.assertIn("classificacoes", launch["launch"])
+        self.assertIn("parcelas", launch["launch"])
+        self.assertEqual(launch["launch"]["fornecedor"]["nome"], movement.pessoa.razao_social)
+        self.assertEqual(launch["launch"]["faturado"]["nome"], movement.faturado.razao_social)
+        self.assertEqual(launch["launch"]["classificacoes"][0]["descricao"], "MANUTENCAO E OPERACAO")
+        self.assertGreaterEqual(len(launch["launch"]["parcelas"]), 2)
+        self.assertIn("identificacao", launch["launch"]["parcelas"][0])
+        self.assertIn("numero", launch["launch"]["parcelas"][0])
+        self.assertIn("vencimento", launch["launch"]["parcelas"][0])
+        self.assertIn("valor", launch["launch"]["parcelas"][0])
+        self.assertIsInstance(launch["launch"]["movements"][0]["classificacoes"][0]["id"], int)
+        self.assertIsInstance(launch["launch"]["movements"][0]["parcelas"][0]["id"], int)
+        self.assertEqual(
+            launch["launch"]["movements"][0]["parcelas_ids"],
+            [item.id for item in movement.parcelas.order_by("numero")],
+        )
+        self.assertFalse(launch["launch"]["movements"][0]["movement_id"] is None)
+
+    @patch("invoices.services.uuid.uuid4")
+    def test_extract_generates_stable_unique_number_for_missing_document(self, mock_uuid4) -> None:
+        mock_uuid4.side_effect = [
+            SimpleNamespace(hex="a" * 12),
+            SimpleNamespace(hex="b" * 12),
+            SimpleNamespace(hex="c" * 12),
+            SimpleNamespace(hex="d" * 12),
+        ]
+        service = InvoiceExtractionService()
+        payload = self._payload_with_installments_and_classifications()
+        payload["numero_nota_fiscal"] = ""
+
+        with patch.object(
+            service.pdf_agent,
+            "extract",
+            return_value=ExtractionResult(data=payload, provider="gemini"),
+        ):
+            first_payload = service.extract(SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf"))
+            second_payload = service.extract(SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf"))
+
+        first_launch = service.launch(first_payload["id"])
+        second_launch = service.launch(second_payload["id"])
+
+        first_movement = MovimentoContas.objects.get(id=first_launch["launch"]["movements"][0]["movement_id"])
+        second_movement = MovimentoContas.objects.get(id=second_launch["launch"]["movements"][0]["movement_id"])
+        self.assertNotEqual(first_movement.numero_documento, second_movement.numero_documento)
+        self.assertTrue(first_movement.numero_documento.startswith("SEM-NUMERO-APAGAR-"))
+        self.assertTrue(second_movement.numero_documento.startswith("SEM-NUMERO-APAGAR-"))
+
+    def test_launch_rewrites_duplicate_document_number_for_same_movement_type(self) -> None:
+        service = InvoiceExtractionService()
+        payload = self._payload_with_installments_and_classifications()
+        payload["numero_nota_fiscal"] = "000.011.111"
+
+        with patch.object(
+            service.pdf_agent,
+            "extract",
+            return_value=ExtractionResult(data=payload, provider="gemini"),
+        ):
+            first_payload = service.extract(SimpleUploadedFile("nota_fiscal_1.pdf", b"%PDF-1.4 mock", content_type="application/pdf"))
+            second_payload = service.extract(SimpleUploadedFile("nota_fiscal_2.pdf", b"%PDF-1.4 mock", content_type="application/pdf"))
+
+        first_launch = service.launch(first_payload["id"])
+        second_launch = service.launch(second_payload["id"])
+
+        first_movement = MovimentoContas.objects.get(id=first_launch["launch"]["movements"][0]["movement_id"])
+        second_movement = MovimentoContas.objects.get(id=second_launch["launch"]["movements"][0]["movement_id"])
+
+        self.assertEqual(first_movement.numero_documento, "000.011.111")
+        self.assertEqual(second_movement.numero_documento, "000.011.111-2")
+        self.assertEqual(first_movement.tipo, second_movement.tipo)
+
+    def test_extract_reatives_multiple_revenue_classifications_and_parcels(self) -> None:
+        service = InvoiceExtractionService()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+        payload_input = self._payload_with_installments_and_classifications(movement_type=MovimentoContas.Tipo.ARECEBER)
+
+        with patch.object(service.pdf_agent, "extract", return_value=ExtractionResult(data=payload_input, provider="gemini")):
+            payload = service.extract(file)
+
+        launch = service.launch(payload["id"])
+        movement_types = [item["movement_type"] for item in launch["launch"]["movements"]]
+        movement_ids = [item["movement_id"] for item in launch["launch"]["movements"]]
+
+        self.assertIn(MovimentoContas.Tipo.ARECEBER, movement_types)
+        self.assertGreaterEqual(len(launch["launch"]["movements"]), 1)
+        for movement in MovimentoContas.objects.filter(id__in=movement_ids):
+            self.assertIn(movement.tipo, movement_types)
+
+    def test_extract_and_launch_supports_misto_movements(self) -> None:
+        service = InvoiceExtractionService()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+        payload_input = self._payload_with_installments_and_classifications()
+        payload_input["natureza_operacao"] = "Compra e faturamento de serviços"
+        payload_input["classificacoes_despesa"] = [
+            {"categoria": "MANUTENCAO E OPERACAO", "justificativa": "Despesa para manutenção."},
+            {"categoria": "PROVENTOS", "justificativa": "Faturamento de serviços mensais."},
+        ]
+
+        with patch.object(service.pdf_agent, "extract", return_value=ExtractionResult(data=payload_input, provider="gemini")):
+            payload = service.extract(file)
+
+        analysis = service.analyze(payload["id"])
+        launch = service.launch(payload["id"])
+
+        self.assertEqual(analysis["movement_type"], "MISTO")
+        self.assertEqual(len(analysis["analysis"]["blocks"]), 2)
+        self.assertEqual(len(launch["launch"]["movements"]), 2)
+        self.assertEqual(launch["movement_type"], "MISTO")
+        movement_types = sorted(item["movement_type"] for item in launch["launch"]["movements"])
+        self.assertEqual(movement_types, [MovimentoContas.Tipo.APAGAR, MovimentoContas.Tipo.ARECEBER])
+
+    def test_extract_fills_missing_due_dates_with_issue_date(self) -> None:
+        service = InvoiceExtractionService()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+        payload_input = self._payload_with_installments_and_classifications()
+        payload_input["parcelas"][0]["data_vencimento"] = ""
+        payload_input["parcelas"][1]["data_vencimento"] = ""
+
+        with patch.object(service.pdf_agent, "extract", return_value=ExtractionResult(data=payload_input, provider="gemini")):
+            payload = service.extract(file)
+
+        launch = service.launch(payload["id"])
+
+        due_dates = [item["data_vencimento"] for item in payload["data"]["parcelas"]]
+        self.assertEqual(due_dates, ["2024-01-15", "2024-01-15"])
+
+        movement = MovimentoContas.objects.get(id=launch["launch"]["movements"][0]["movement_id"])
+        self.assertEqual(
+            [str(item["data_vencimento"]) for item in movement.parcelas.values("data_vencimento").order_by("numero")],
+            ["2024-01-15", "2024-01-15"],
+        )
+
+    def test_extract_reactivates_inactive_people_and_classifications(self) -> None:
+        inactive_supplier = Pessoa.objects.create(
+            razao_social="FORNECEDORA INATIVA",
+            nome_fantasia="FORN INATIVA",
+            cnpj="88.888.888/0001-88",
+            ativo=False,
+            is_fornecedor=True,
+        )
+        inactive_billed = Pessoa.objects.create(
+            razao_social="CLIENTE INATIVO",
+            nome_fantasia="CLI INATIVO",
+            cpf="999.999.999-99",
+            ativo=False,
+            is_faturado=True,
+        )
+        inactive_classification = Classificacao.objects.create(
+            tipo=Classificacao.Tipo.DESPESA,
+            descricao="MANUTENCAO E OPERACAO",
+            ativo=False,
+        )
+
+        service = InvoiceExtractionService()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+        payload_input = self._payload_with_installments_and_classifications()
+        payload_input["fornecedor"]["cnpj"] = inactive_supplier.cnpj
+        payload_input["fornecedor"]["razao_social"] = inactive_supplier.razao_social
+        payload_input["faturado"]["cpf"] = inactive_billed.cpf
+        payload_input["faturado"]["nome_completo"] = inactive_billed.razao_social
+        payload_input["classificacoes_despesa"] = [{"categoria": inactive_classification.descricao, "justificativa": "Reativado no teste."}]
+
+        with patch.object(service.pdf_agent, "extract", return_value=ExtractionResult(data=payload_input, provider="gemini")):
+            payload = service.extract(file)
+        analysis = service.analyze(payload["id"])
+        launch = service.launch(payload["id"])
+        self.assertEqual(launch["launch"]["movements"][0]["movement_type"], MovimentoContas.Tipo.APAGAR)
+
+        inactive_supplier.refresh_from_db()
+        inactive_billed.refresh_from_db()
+        inactive_classification.refresh_from_db()
+        self.assertTrue(analysis["analysis"]["fornecedor"]["reactivated"])
+        self.assertTrue(analysis["analysis"]["faturado"]["reactivated"])
+        self.assertTrue(analysis["analysis"]["classificacoes"][0]["reactivated"])
+        self.assertTrue(inactive_supplier.ativo)
+        self.assertTrue(inactive_billed.ativo)
+        self.assertTrue(inactive_classification.ativo)
+
+    def test_extract_rolls_back_when_installment_creation_fails(self) -> None:
+        inactive_supplier = Pessoa.objects.create(
+            razao_social="FORNECEDORA ROLLBACK",
+            nome_fantasia="ROLLBACK FORN",
+            cnpj="77.777.777/0001-77",
+            ativo=False,
+            is_fornecedor=True,
+        )
+        inactive_classification = Classificacao.objects.create(
+            tipo=Classificacao.Tipo.DESPESA,
+            descricao="MANUTENCAO E OPERACAO",
+            ativo=False,
+        )
+        baseline = {
+            "invoice_count": InvoiceExtraction.objects.count(),
+            "movement_count": MovimentoContas.objects.count(),
+            "parcel_count": ParcelaContas.objects.count(),
+        }
+
+        service = InvoiceExtractionService()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+        payload_input = self._payload_with_installments_and_classifications()
+        payload_input["fornecedor"]["cnpj"] = inactive_supplier.cnpj
+
+        with patch.object(service, "_create_installments", side_effect=RuntimeError("Falha no lote de parcelas")), \
+            patch.object(service.pdf_agent, "extract", return_value=ExtractionResult(data=payload_input, provider="gemini")):
+            payload = service.extract(file)
+            service.analyze(payload["id"])
+            with self.assertRaises(RuntimeError):
+                service.launch(payload["id"])
+
+        self.assertEqual(InvoiceExtraction.objects.count(), baseline["invoice_count"] + 1)
+        self.assertEqual(MovimentoContas.objects.count(), baseline["movement_count"])
+        self.assertEqual(ParcelaContas.objects.count(), baseline["parcel_count"])
+        inactive_supplier.refresh_from_db()
+        inactive_classification.refresh_from_db()
+        self.assertFalse(inactive_supplier.ativo)
+        self.assertFalse(inactive_classification.ativo)
     @override_settings(GEMINI_API_KEY="")
     def test_extract_uses_mock_without_gemini_key(self) -> None:
         service = InvoiceExtractionService()
@@ -361,7 +678,7 @@ class InvoiceExtractionServiceTests(TestCase):
             steps.append("ExpenseClassificationAgent.classify")
             return original_classify(products)
 
-        def fake_save_success(uploaded_file, data, provider):
+        def fake_save_success(uploaded_file, data, provider, movement_type="", movimento=None):
             steps.append("PersistenceAgent.save_success")
             return original_save_success(uploaded_file, data, provider)
 
@@ -380,7 +697,6 @@ class InvoiceExtractionServiceTests(TestCase):
                 "PdfExtractionAgent.extract",
                 "ValidationAgent.normalize",
                 "ExpenseClassificationAgent.classify",
-                "ValidationAgent.normalize",
                 "PersistenceAgent.save_success",
             ],
         )
@@ -439,17 +755,32 @@ class PdfExtractionAgentTests(TestCase):
         self.assertNotIn("test-key", result.fallback_reason)
         self.assertIn("fornecedor", result.data)
 
-    def test_read_real_pdf_with_pypdf(self) -> None:
-        pdf_path = Path(r"C:\Users\pmgam\Downloads\danfe (beltrano - insumos).pdf")
-        if not pdf_path.exists():
-            self.skipTest("Arquivo local ausente. Consulte README para validação manual com esse PDF.")
+    @staticmethod
+    def _extract_text_from_local_pdf_file(filename: str) -> str:
+        pdf_path = Path(__file__).resolve().parents[1] / filename
+        assert pdf_path.exists(), f"Arquivo de referência não encontrado: {pdf_path}"
 
         with pdf_path.open("rb") as file:
-            uploaded_pdf = SimpleUploadedFile("danfe (beltrano - insumos).pdf", file.read(), content_type="application/pdf")
+            uploaded_pdf = SimpleUploadedFile(pdf_path.name, file.read(), content_type="application/pdf")
 
         agent = PdfExtractionAgent()
-        extracted_text = agent._read_pdf_text(uploaded_pdf)
-        self.assertTrue(extracted_text)
+        return agent._read_pdf_text(uploaded_pdf)
+
+    def test_read_real_pdf_beltrano_with_pypdf(self) -> None:
+        extracted_text = self._extract_text_from_local_pdf_file("danfe (beltrano - insumos).pdf")
+
+        self.assertIsInstance(extracted_text, str)
+        self.assertGreater(len(extracted_text.strip()), 0)
+
+    def test_read_real_pdf_materiais_with_pypdf(self) -> None:
+        extracted_text = self._extract_text_from_local_pdf_file("danfe (materiais).pdf")
+
+        self.assertIsInstance(extracted_text, str)
+        self.assertGreater(len(extracted_text.strip()), 0)
+
+    def test_read_real_pdf_pecas_with_pypdf(self) -> None:
+        extracted_text = self._extract_text_from_local_pdf_file("danfe (peças).pdf")
+
         self.assertIsInstance(extracted_text, str)
         self.assertGreater(len(extracted_text.strip()), 0)
 
@@ -491,6 +822,10 @@ class PdfExtractionAgentTests(TestCase):
         self.assertIn("INSUMOS AGRICOLAS", prompt)
         self.assertIn("classifique", prompt.lower())
         self.assertIn("somente json", prompt.lower())
+        self.assertIn("nao invente valores", prompt.lower())
+        self.assertIn("NUTRICAO E SAUDE ANIMAL", prompt)
+        self.assertIn("TECNOLOGIA E MONITORAMENTO", prompt)
+        self.assertIn("ARMAZENAGEM E POS-COLHEITA", prompt)
 
 
 class ExpenseClassificationAgentTests(TestCase):
@@ -501,19 +836,19 @@ class ExpenseClassificationAgentTests(TestCase):
         result = self.classifier.classify([{"descricao": "Oleo Diesel S10"}])
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["categoria"], "MANUTENCAO E OPERACAO")
-        self.assertIn("Produto relacionado", result[0]["justificativa"])
+        self.assertIn("Classificacao baseada", result[0]["justificativa"])
 
     def test_classifies_hydraulic_material(self) -> None:
         result = self.classifier.classify([{"descricao": "Torneira e material hidráulico"}])
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["categoria"], "INFRAESTRUTURA E UTILIDADES")
-        self.assertIn("Produto relacionado", result[0]["justificativa"])
+        self.assertIn("Classificacao baseada", result[0]["justificativa"])
 
     def test_classifies_fungicida_as_insumos_agricolas(self) -> None:
         result = self.classifier.classify([{"descricao": "VESSARYA BOMBONA 10L FUNGICIDA"}])
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["categoria"], "INSUMOS AGRICOLAS")
-        self.assertIn("fungicida", result[0]["justificativa"])
+        self.assertIn("fungicida", result[0]["justificativa"].lower())
 
     def test_classifies_agrotecnicos_products_as_insumos_agricolas(self) -> None:
         for term in [
@@ -529,6 +864,26 @@ class ExpenseClassificationAgentTests(TestCase):
             with self.subTest(term=term):
                 result = self.classifier.classify([{"descricao": f"{term} concentrado"}])
                 self.assertEqual(result[0]["categoria"], "INSUMOS AGRICOLAS")
+
+    def test_classifies_accented_terms_and_synonyms(self) -> None:
+        result = self.classifier.classify([{"descricao": "Fertilizante complexo e corretivos para cultura de milho"}])
+        self.assertEqual(result[0]["categoria"], "INSUMOS AGRICOLAS")
+        self.assertIn("Classificacao baseada", result[0]["justificativa"])
+
+    def test_classifies_animal_nutrition_items(self) -> None:
+        result = self.classifier.classify([{"descricao": "Ração com suplemento mineral para gado"}])
+        self.assertEqual(result[0]["categoria"], "NUTRICAO E SAUDE ANIMAL")
+        self.assertIn("racao", result[0]["justificativa"].lower())
+
+    def test_classifies_technology_monitoring_items(self) -> None:
+        result = self.classifier.classify([{"descricao": "Licença de software agrícola com telemetria e GPS"}])
+        self.assertEqual(result[0]["categoria"], "TECNOLOGIA E MONITORAMENTO")
+        self.assertIn("software", result[0]["justificativa"].lower())
+
+    def test_classifies_post_harvest_items(self) -> None:
+        result = self.classifier.classify([{"descricao": "Big bag e sacaria para armazenagem pós-colheita"}])
+        self.assertEqual(result[0]["categoria"], "ARMAZENAGEM E POS-COLHEITA")
+        self.assertIn("big bag", result[0]["justificativa"].lower())
 
 
 class ValidationAgentTests(TestCase):
@@ -651,3 +1006,122 @@ class ValidationAgentTests(TestCase):
 
         with self.assertRaises(ValueError):
             self.validator.validate(invalid_data)
+
+
+class InvoiceWorkflowApiTests(TestCase):
+    @patch(
+        "invoices.services.PdfExtractionAgent.extract",
+        return_value=ExtractionResult(
+            data={
+                "fornecedor": {
+                    "razao_social": "FORNECEDOR PAGO",
+                    "fantasia": "FORN PAGO",
+                    "cnpj": "11.111.111/0001-11",
+                },
+                "faturado": {"nome_completo": "PESSOA FISCAL", "cpf": "222.222.222-22"},
+                "numero_nota_fiscal": "995",
+                "data_emissao": "2024-01-01",
+                "natureza_operacao": "Compra de insumo",
+                "produtos": [{"descricao": "Peça de reposição e reparo", "quantidade": 1}],
+                "parcelas": [{"numero": 1, "data_vencimento": "2024-02-01", "valor": 100.0}],
+                "valor_total": 100.0,
+                "classificacoes_despesa": [{"categoria": "ADMINISTRATIVAS", "justificativa": "Despesa administrativa."}],
+            },
+            provider="gemini",
+        ),
+    )
+    @override_settings(GEMINI_API_KEY="test-key")
+    def test_analyze_infers_apagar_movement_type(self, _mock_extract) -> None:
+        response = self.client.post(
+            reverse("invoices:extract_invoice"),
+            {"pdf": SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")},
+        )
+
+        payload = response.json()
+        analysis_response = self.client.post(reverse("invoices:analyze_invoice", args=[payload["id"]]), {})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(analysis_response.status_code, 200)
+        analysis_payload = analysis_response.json()
+        self.assertIn("movement_type", analysis_payload)
+        self.assertEqual(analysis_payload["analysis"]["blocks"][0]["movement_type"], MovimentoContas.Tipo.APAGAR)
+        self.assertEqual(analysis_payload["movement_type"], MovimentoContas.Tipo.APAGAR)
+
+    @patch(
+        "invoices.services.PdfExtractionAgent.extract",
+        return_value=ExtractionResult(
+            data={
+                "fornecedor": {"razao_social": "CLIENTE", "fantasia": "CLIENTE", "cnpj": "11.111.111/0001-11"},
+                "faturado": {"nome_completo": "CLIENTE FINAL", "cpf": "222.222.222-22"},
+                "numero_nota_fiscal": "990",
+                "data_emissao": "2024-01-01",
+                "natureza_operacao": "Prestacao de servicos faturados",
+                "produtos": [{"descricao": "Honorarios de consultoria", "quantidade": 1}],
+                "parcelas": [{"numero": 1, "data_vencimento": "2024-02-01", "valor": 100.0}],
+                "valor_total": 100.0,
+                "classificacoes_despesa": [{"categoria": "PROVENTOS", "justificativa": "Faturamento de serviço"}],
+            },
+            provider="gemini",
+        ),
+    )
+    @override_settings(GEMINI_API_KEY="test-key")
+    def test_analyze_infers_areceber_movement_type(self, _mock_extract) -> None:
+        response = self.client.post(
+            reverse("invoices:extract_invoice"),
+            {"pdf": SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")},
+        )
+
+        payload = response.json()
+        analysis_response = self.client.post(reverse("invoices:analyze_invoice", args=[payload["id"]]), {})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(analysis_response.status_code, 200)
+        analysis_payload = analysis_response.json()
+        self.assertIn("movement_type", analysis_payload)
+        self.assertEqual(analysis_payload["analysis"]["blocks"][0]["movement_type"], MovimentoContas.Tipo.ARECEBER)
+        self.assertEqual(analysis_payload["movement_type"], MovimentoContas.Tipo.ARECEBER)
+
+    @patch(
+        "invoices.services.PdfExtractionAgent.extract",
+        return_value=ExtractionResult(
+            data={
+                "fornecedor": {
+                    "razao_social": "FORNECEDORA MISTA",
+                    "fantasia": "FORN MISTA",
+                    "cnpj": "55.555.555/0001-55",
+                },
+                "faturado": {
+                    "nome_completo": "CLIENTE MISTO",
+                    "cpf": "111.111.111-11",
+                },
+                "numero_nota_fiscal": "992",
+                "data_emissao": "2024-01-01",
+                "natureza_operacao": "Venda e manutenção",
+                "produtos": [
+                    {"descricao": "Servico de consultoria", "quantidade": 1},
+                    {"descricao": "Oleo Diesel S10", "quantidade": 2},
+                ],
+                "parcelas": [{"numero": 1, "data_vencimento": "2024-02-01", "valor": 100.0}],
+                "valor_total": 100.0,
+                "classificacoes_despesa": [
+                    {"categoria": "PROVENTOS", "justificativa": "Receita por serviço."},
+                    {"categoria": "MANUTENCAO E OPERACAO", "justificativa": "Despesa de manutenção."},
+                ],
+            },
+            provider="gemini",
+        ),
+    )
+    @override_settings(GEMINI_API_KEY="test-key")
+    def test_analyze_infers_misto_movement_type(self, _mock_extract) -> None:
+        response = self.client.post(
+            reverse("invoices:extract_invoice"),
+            {"pdf": SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")},
+        )
+
+        payload = response.json()
+        analysis_response = self.client.post(reverse("invoices:analyze_invoice", args=[payload["id"]]), {})
+        analysis_payload = analysis_response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(analysis_response.status_code, 200)
+        self.assertEqual(analysis_payload["movement_type"], "MISTO")
+        self.assertEqual(len(analysis_payload["analysis"]["blocks"]), 2)
+

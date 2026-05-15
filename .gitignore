@@ -8,3 +8,7 @@ db.sqlite3
 playwright-report/
 test-results/
 .pytest_cache/
+agent_prompts/
+agent_reports/
+agente-cursor.md
+scripts/

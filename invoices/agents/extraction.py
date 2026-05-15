@@ -100,25 +100,52 @@ Formato esperado do contrato (apenas JSON):
 }
 """
         return f"""
-Extraia os dados de uma DANFE/NF-e e devolva SOMENTE JSON valido, sem texto adicional, sem explicacoes e sem markdown.
+Voce e um extrator especialista em DANFE/NF-e para automacao financeira.
+Sua tarefa e ler o texto cru do documento e devolver SOMENTE JSON valido, contendo apenas um objeto JSON.
+
+PROIBICOES ABSOLUTAS:
+- nao escreva markdown
+- nao escreva comentarios
+- nao escreva explicacoes fora do JSON
+- nao use chaves extras fora do contrato
+- nao invente valores que nao estejam no documento; quando faltar dado, devolva string vazia, lista vazia ou 0 conforme o contrato
+
 Entrada: texto cru da nota fiscal:
 \"\"\"{pdf_text[:12000]}\"\"\"
 
 {contract}
-Regras:
-- Extrair campo em `fornecedor` como emitente da nota.
-- Extrair campo em `faturado` como destinatário.
-- Extrair `numero_nota_fiscal` da NF-e (NÚMERO DA NOTA).
-- Extrair serie, chave de acesso, natureza da operação, protocolo/autorização, datas e horários quando estiverem no DANFE.
-- Extrair `data_emissao` no formato `YYYY-MM-DD` sempre que possivel.
-- Extrair dados cadastrais completos de fornecedor/faturado quando existirem: CNPJ/CPF, IE, endereço, bairro, município, UF, CEP e telefone.
-- Extrair `produtos` a partir de itens da nota fiscal: código, descrição, NCM, CST/CSOSN, CFOP, unidade, quantidade, valor unitário e valor total.
-- Extrair `parcelas` com os dados de vencimento somente quando a data estiver explicitamente identificada como `vencimento`/`vencto` no documento; se não estiver explícito, deixe `data_vencimento` vazia.
-- Extrair `valor_total` com valor da nota e também totais/impostos: produtos, frete, desconto, seguro, outras despesas, base/valor ICMS, ICMS ST, IPI, PIS e COFINS.
-- Extrair local de entrega, transportador/volumes e informações complementares quando existirem.
-- DESPESA não é campo literal da nota e TipoDespesa também não deve ser copiado literal: classifique conforme os `produtos` identificados.
-- Use listas para produtos, parcelas e classificacoes_despesa, mesmo com 1 item.
-- Classificar despesa usando apenas as categorias oficiais:
+INSTRUCOES DE EXTRAÇÃO:
+- `fornecedor` = emitente/remetente/prestador que vende ou presta o servico.
+- `faturado` = destinatario/comprador/recebedor/tomador.
+- `numero_nota_fiscal` = numero da NF/NF-e/DANFE. Nao usar serie no lugar do numero.
+- Extrair serie, chave de acesso, natureza da operacao, protocolo/autorizacao, datas e horarios quando estiverem presentes.
+- Datas devem ser normalizadas para `YYYY-MM-DD` sempre que possivel.
+- Preencher dados cadastrais completos de fornecedor e faturado quando existirem: CNPJ/CPF, IE, endereco, numero, bairro, municipio, UF, CEP, telefone.
+- Extrair TODOS os itens de `produtos` identificados no documento com codigo, descricao, NCM, CST/CSOSN, CFOP, unidade, quantidade, valor unitario e valor total quando disponiveis.
+- Se houver apenas 1 produto, ainda assim `produtos` deve ser lista.
+- `parcelas` deve ser lista. Extrair parcelas e vencimentos somente quando o documento trouxer isso de forma explicita como `vencimento`, `vencto`, `vcto`, `duplicata`, `fatura` ou secao equivalente.
+- Nao invente `data_vencimento`: se o vencimento nao estiver explicitamente identificado, deixe vazio.
+- Extrair `valor_total` da nota e tambem os totais/impostos: produtos, frete, desconto, seguro, outras despesas, base/valor ICMS, ICMS ST, IPI, PIS e COFINS.
+- Extrair `local_entrega`, `transportador` e `informacoes_complementares` quando estiverem presentes.
+
+INSTRUCOES DE INTERPRETACAO DA DESPESA:
+- `DESPESA` nao e campo literal da nota. Ela deve ser INTERPRETADA a partir dos produtos/servicos descritos.
+- Classifique a despesa somente a partir dos itens/servicos efetivamente encontrados no documento.
+- Nunca copie texto livre como categoria. Use somente categorias oficiais.
+- Gere `classificacoes_despesa` como lista de objetos com `categoria` e `justificativa`.
+- A justificativa deve citar objetivamente os itens/termos do documento que motivaram a classificacao.
+- Se houver varios itens com naturezas claramente diferentes, voce pode retornar mais de uma classificacao.
+- Prefira a categoria mais especifica possivel.
+- Exemplos de mapeamento:
+  - diesel, lubrificante, filtro, peca, pneu -> MANUTENCAO E OPERACAO
+  - material hidraulico, tubo, torneira, bomba submersa, energia -> INFRAESTRUTURA E UTILIDADES
+  - semente, adubo, fertilizante, fungicida, herbicida -> INSUMOS AGRICOLAS
+  - frete, armazenagem, secagem, colheita terceirizada -> SERVICOS OPERACIONAIS
+  - honorario, contabilidade, taxa bancaria, software administrativo -> ADMINISTRATIVAS
+  - racao, suplemento mineral, vacina animal -> NUTRICAO E SAUDE ANIMAL
+  - drone, telemetria, gps agricola, software agricola -> TECNOLOGIA E MONITORAMENTO
+
+CATEGORIAS OFICIAIS PERMITIDAS:
   - INSUMOS AGRICOLAS
   - MANUTENCAO E OPERACAO
   - RECURSOS HUMANOS
@@ -128,9 +155,15 @@ Regras:
   - SEGUROS E PROTECAO
   - IMPOSTOS E TAXAS
   - INVESTIMENTOS
-- `classificacoes_despesa` precisa ser objeto com `categoria` e `justificativa`, com categoria oficialmente válida.
-- Se algum campo faltar, use string/numero vazio ou 0.
-- Nunca use markdown.
+  - NUTRICAO E SAUDE ANIMAL
+  - TECNOLOGIA E MONITORAMENTO
+  - ARMAZENAGEM E POS-COLHEITA
+
+VALIDACAO FINAL ANTES DE RESPONDER:
+- responda apenas com JSON valido
+- preserve exatamente os nomes das chaves do contrato
+- `classificacoes_despesa` deve conter apenas categorias oficiais
+- se houver duvida entre duas categorias, escolha a mais sustentada pelos itens descritos
 """
 
     def _parse_json(self, text: str) -> dict:

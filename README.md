@@ -4,20 +4,36 @@ Aplicação web em Django para upload de PDF de nota fiscal, extração dos dado
 
 ## Arquitetura com Agents
 
-Esta etapa usa os agents do código no fluxo de extração:
+Esta etapa usa os agents do código no fluxo replanejado:
 
 - PdfExtractionAgent: percebe e processa o PDF enviado, com chamada ao Gemini para interpretação quando houver chave.
 - ValidationAgent: valida o JSON extraido e normaliza no contrato esperado.
 - ExpenseClassificationAgent: decide as classificações de despesa com base nos dados dos produtos.
 - PersistenceAgent: persiste o resultado da extração no banco (sucesso ou erro).
-- InvoiceExtractionService: orquestra os agents e retorna a estrutura final para a API.
+- InvoiceExtractionService: orquestra os agents e expõe os endpoints de extração, análise e lançamento.
 
-Fluxo operacional alinhado ao PPTX:
+Fluxo operacional replanejado:
 
-1. Perceber: Usuário envia PDF em `POST /api/invoices/extract/`.
-2. Processar e interpretar: PdfExtractionAgent interpreta o documento com Gemini ou fallback mock.
-3. Decidir: ValidationAgent valida o JSON e ExpenseClassificationAgent adiciona classificacoes.
-4. Agir: PersistenceAgent grava no banco e a resposta é retornada para a interface mostrar o JSON.
+1. Usuário envia PDF em `POST /api/invoices/extract/`.
+2. O backend valida e persiste o JSON bruto no banco em `InvoiceExtraction`.
+3. Usuário aciona `POST /api/invoices/analyze/<id>/` para inferir tipo de movimento e validar pessoas/classificações.
+4. Usuário aciona `POST /api/invoices/launch/<id>/` para lançar as parcelas financeiras (se necessário, pode ser chamado direto após extração, pois o serviço recalcula a análise internamente).
+5. A inferência de movimento pode retornar `APAGAR`, `ARECEBER` ou `MISTO`.
+
+## Etapa 2 - Importação financeira
+
+- O endpoint inicial é `POST /api/invoices/extract/`.
+- Resposta da extração: retorna `success`, `id`, `provider`, `data` e `fallback_reason` se aplicável.
+- Análise em `POST /api/invoices/analyze/<id>/` retorna:
+  - `movement_type`
+  - `analysis`
+  - `metadata`
+- Lançamento em `POST /api/invoices/launch/<id>/` retorna:
+  - `success`
+  - `movement_type`
+  - `launch`
+  - `message` em `launch`
+- A inferência `MISTO` gera múltiplos movimentos e o lançamento será feito para cada bloco inferido.
 
 ## Como rodar com Docker + PostgreSQL
 
@@ -62,25 +78,36 @@ NUNCA commite o arquivo `.env` no repositório.
 python manage.py test invoices
 ```
 
+## Comandos de validação da Etapa 2
+
+```powershell
+$env:DATABASE_URL=''
+python manage.py test invoices
+npm run test:e2e
+docker compose config
+```
+
 Para forçar SQLite local durante testes com PostgreSQL configurado:
 
 ```powershell
 $env:DATABASE_URL=''; python manage.py test invoices
 ```
 
-Para validar o cenário de fallback com Gemini definido:
+Para validar cenário de fallback com Gemini definido:
 
 ```powershell
 python manage.py test invoices.tests.InvoiceExtractApiTests
 ```
 
-### Validação de PDF real de referência
+## Validação com PDFs reais de referência
 
-Para validar texto extraível com `pypdf` no PDF real indicado pelo critério, abra no ambiente com acesso ao arquivo:
+A validação local de extração de texto com `pypdf` deve usar os arquivos abaixo:
 
-`C:\Users\pmgam\Downloads\danfe (beltrano - insumos).pdf`
+- `danfe (beltrano - insumos).pdf`
+- `danfe (materiais).pdf`
+- `danfe (peças).pdf`
 
-O teste não versiona esse PDF no repositório. Se o arquivo não estiver disponível, execute a verificação manualmente no seu ambiente local e registre o resultado.
+Os testes `PdfExtractionAgentTests.test_read_real_pdf_*_with_pypdf` percorrem esses arquivos.
 
 ## Testes E2E com Playwright
 
@@ -90,9 +117,9 @@ npx playwright install
 npm run test:e2e
 ```
 
-Os testes de Playwright usam mocks/fallbacks e nao dependem de `GEMINI_API_KEY` real. Eles podem ser executados com `DATABASE_URL=""` e `GEMINI_API_KEY=""` em ambiente isolado.
+Os testes de Playwright validam o fluxo em três passos: extração, análise e lançamento.
 
-### Notas de variaveis de ambiente
+## Notas de variaveis de ambiente
 
 - O arquivo `.env` eh usado para execucao real/local.
 - `GEMINI_API_KEY` deve ficar apenas no `.env`.

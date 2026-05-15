@@ -1,42 +1,83 @@
 from __future__ import annotations
 
-from django.conf import settings
-from django.http import JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
-from django.views.decorators.http import require_POST
 
-from .agents import PersistenceAgent
 from .services import InvoiceExtractionService
 
-
-def index(request):
+def index(request: HttpRequest) -> HttpResponse:
     return render(request, "invoices/index.html")
 
 
-@require_POST
-def extract_invoice(request):
-    uploaded_file = request.FILES.get("pdf")
-    if not uploaded_file:
-        return JsonResponse({"error": "Arquivo PDF é obrigatório.", "detail": "Envie o campo 'pdf' no multipart/form-data."}, status=400)
-
-    is_pdf_by_name = uploaded_file.name.lower().endswith(".pdf")
-    allowed_content_types = {"application/pdf", "application/x-pdf", "application/octet-stream"}
-    is_pdf_by_type = not uploaded_file.content_type or uploaded_file.content_type in allowed_content_types
-
-    if not is_pdf_by_name or not is_pdf_by_type:
-        return JsonResponse({"error": "Formato do arquivo inválido.", "detail": "Envie somente arquivos PDF (.pdf)."}, status=400)
-
-    if uploaded_file.size > settings.MAX_UPLOAD_SIZE:
+def extract_invoice(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
         return JsonResponse(
-            {"error": "Arquivo muito grande.", "detail": "O tamanho máximo permitido é 10 MB."},
+            {"error": "Metodo nao permitido.", "detail": "Utilize POST em /api/invoices/extract/."},
+            status=405,
+        )
+
+    uploaded_pdf = request.FILES.get("pdf")
+    if uploaded_pdf is None:
+        return JsonResponse(
+            {
+                "error": "Arquivo PDF é obrigatório.",
+                "detail": "Envie o campo 'pdf' com o arquivo para extracao.",
+            },
             status=400,
+        )
+
+    content_type = (uploaded_pdf.content_type or "").lower()
+    name = uploaded_pdf.name or ""
+    if content_type != "application/pdf" and not name.lower().endswith(".pdf"):
+        return JsonResponse({"error": "Formato do arquivo inválido.", "detail": "Envie um arquivo PDF no campo 'pdf'."}, status=400)
+
+    service = InvoiceExtractionService()
+    try:
+        payload = service.extract(uploaded_pdf)
+        return JsonResponse(payload)
+    except ValueError as exc:
+        service.persistence_agent.save_error(uploaded_pdf, str(exc))
+        return JsonResponse(
+            {"error": "Falha ao extrair dados do PDF.", "detail": str(exc)},
+            status=400,
+        )
+    except Exception as exc:
+        service.persistence_agent.save_error(uploaded_pdf, str(exc), provider="system")
+        return JsonResponse(
+            {"error": "Erro interno ao processar o arquivo.", "detail": str(exc)},
+            status=500,
+        )
+
+
+def analyze_invoice(request: HttpRequest, extraction_id: int) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse(
+            {"error": "Metodo nao permitido.", "detail": "Utilize POST em /api/invoices/analyze/<id>/."},
+            status=405,
         )
 
     service = InvoiceExtractionService()
     try:
-        return JsonResponse(service.extract(uploaded_file))
+        payload = service.analyze(extraction_id)
+        return JsonResponse(payload)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=404)
     except Exception as exc:
-        PersistenceAgent().save_error(uploaded_file, str(exc))
-        if isinstance(exc, ValueError):
-            return JsonResponse({"error": "Falha ao extrair dados do PDF.", "detail": str(exc)}, status=400)
-        return JsonResponse({"error": "Erro interno ao processar o PDF.", "detail": str(exc)}, status=500)
+        return JsonResponse({"error": "Erro interno ao analisar documento.", "detail": str(exc)}, status=500)
+
+
+def launch_invoice(request: HttpRequest, extraction_id: int) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse(
+            {"error": "Metodo nao permitido.", "detail": "Utilize POST em /api/invoices/launch/<id>/."},
+            status=405,
+        )
+
+    service = InvoiceExtractionService()
+    try:
+        payload = service.launch(extraction_id)
+        return JsonResponse(payload)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=404)
+    except Exception as exc:
+        return JsonResponse({"error": "Erro interno ao executar lancamento.", "detail": str(exc)}, status=500)

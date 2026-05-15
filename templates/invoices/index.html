@@ -62,6 +62,22 @@
           <p id="provider-badge" class="provider-badge" hidden></p>
         </div>
 
+        <div class="result-actions">
+          <button id="analyze-button" class="action-button" type="button" disabled>Analisar Dados</button>
+        </div>
+
+        <section id="analysis-section" class="analysis-section" hidden aria-labelledby="analysis-title">
+          <h2 id="analysis-title">Resultado da Análise</h2>
+          <p id="analysis-summary" class="analysis-summary" hidden></p>
+          <div id="analysis-grid" class="analysis-grid"></div>
+        </section>
+
+        <section id="launch-section" class="launch-section" hidden aria-labelledby="launch-title">
+          <h2 id="launch-title">Resultado do Lançamento</h2>
+          <p id="launch-message" class="launch-message"></p>
+          <div id="launch-grid" class="launch-grid"></div>
+        </section>
+
         <div class="tabs" role="tablist" aria-label="Visualização dos dados extraídos">
           <button id="tab-formatted" class="tab active" type="button" role="tab" aria-controls="formatted-view" aria-selected="true" data-tab="formatted">
             Visualização Formatada

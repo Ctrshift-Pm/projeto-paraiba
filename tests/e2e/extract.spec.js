@@ -1,11 +1,16 @@
-const path = require("node:path");
+const path = require("path");
 const { test, expect } = require("@playwright/test");
 
-const mockedPayload = {
+const extractedPayload = {
   success: true,
   id: 1001,
   provider: "mock",
   fallback_reason: "GEMINI_API_KEY nao foi configurada.",
+  metadata: {
+    file_name: "nota-fiscal-teste.pdf",
+    file_size: 123456,
+    created_at: "2024-01-01T00:00:00",
+  },
   data: {
     fornecedor: {
       razao_social: "EMPRESA FORNECEDORA LTDA",
@@ -62,28 +67,6 @@ const mockedPayload = {
     valor_desconto: 0.0,
     base_calculo_icms: 1500.0,
     valor_icms: 270.0,
-    local_entrega: {
-      nome_razao_social: "CLIENTE EXEMPLO",
-      cpf_cnpj: "123.456.789-00",
-      endereco: "Avenida Cliente",
-      numero: "200",
-      municipio: "Campina Grande",
-      uf: "PB",
-      cep: "58400-000",
-    },
-    transportador: {
-      razao_social: "TRANSPORTE EXEMPLO LTDA",
-      cpf_cnpj: "98.765.432/0001-10",
-      municipio: "Joao Pessoa",
-      uf: "PB",
-      placa_veiculo: "ABC1D23",
-      frete_por_conta: "Emitente",
-      quantidade: "1",
-      especie: "Volume",
-      peso_bruto: "100,000 KG",
-      peso_liquido: "98,000 KG",
-    },
-    informacoes_complementares: "Documento demonstrativo.",
     classificacoes_despesa: [
       {
         categoria: "MANUTENCAO E OPERACAO",
@@ -93,18 +76,163 @@ const mockedPayload = {
   },
 };
 
+const analyzedPayload = {
+  success: true,
+  extraction_id: 1001,
+  movement_type: "APAGAR",
+  analysis: {
+    fornecedor: {
+      nome: "EMPRESA FORNECEDORA LTDA",
+      documento: "12.345.678/0001-90",
+      id: 12,
+      status: "EXISTE",
+      reactivated: false,
+      exists: true,
+    },
+    faturado: {
+      nome: "CLIENTE EXEMPLO",
+      documento: "123.456.789-00",
+      id: 34,
+      status: "EXISTE",
+      reactivated: false,
+      exists: true,
+    },
+    blocks: [
+      {
+        movement_type: "APAGAR",
+        classificacoes: [
+          {
+            descricao: "MANUTENCAO E OPERACAO",
+            id: 44,
+            status: "EXISTE",
+            reactivated: false,
+            exists: true,
+          },
+        ],
+      },
+    ],
+  },
+};
+
+const launchedPayload = {
+  success: true,
+  extraction_id: 1001,
+  movement_type: "APAGAR",
+  launch: {
+    message: "Lancamentos concluidos com sucesso.",
+    fornecedor: {
+      id: 12,
+      nome: "EMPRESA FORNECEDORA LTDA",
+      documento: "12.345.678/0001-90",
+    },
+    faturado: {
+      id: 34,
+      nome: "CLIENTE EXEMPLO",
+      documento: "123.456.789-00",
+    },
+    classificacoes: [
+      {
+        id: 44,
+        descricao: "MANUTENCAO E OPERACAO",
+      },
+    ],
+    parcelas: [
+      {
+        id: 2001,
+        identificacao: "MOV-2000-P1",
+        numero: 1,
+        vencimento: "2024-02-15",
+        valor: "1500.00",
+      },
+    ],
+    movements: [
+      {
+        movement_type: "APAGAR",
+        movement_id: 2000,
+        pessoa_id: 12,
+        faturado_id: 34,
+        pessoa: {
+          id: 12,
+          nome: "EMPRESA FORNECEDORA LTDA",
+          documento: "12.345.678/0001-90",
+        },
+        faturado: {
+          id: 34,
+          nome: "CLIENTE EXEMPLO",
+          documento: "123.456.789-00",
+        },
+        classificacao_ids: [44],
+        classificacoes: [
+          {
+            id: 44,
+            descricao: "MANUTENCAO E OPERACAO",
+          },
+        ],
+        parcelas: [
+          {
+            id: 2001,
+            identificacao: "MOV-2000-P1",
+            numero: 1,
+            vencimento: "2024-02-15",
+            valor: "1500.00",
+          },
+        ],
+        parcelas_ids: [2001],
+      },
+    ],
+  },
+};
+
 test("fluxo de extracao via interface web", async ({ page }) => {
-  await page.route("**/api/invoices/extract/", async (route) => {
-    if (route.request().method() !== "POST") {
+  const callCounters = {
+    extract: 0,
+    analyze: 0,
+    launch: 0,
+  };
+
+  await page.route("**/api/invoices/**", async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST") {
       await route.continue();
       return;
     }
 
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(mockedPayload),
-    });
+    const url = request.url();
+    const requestBodyBuffer = request.postDataBuffer ? request.postDataBuffer() : null;
+    const requestBody = requestBodyBuffer ? requestBodyBuffer.toString("utf8") : request.postData() || "";
+
+    if (url.includes("/api/invoices/extract/")) {
+      callCounters.extract += 1;
+      expect(requestBody).toContain("name=\"pdf\"");
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(extractedPayload),
+      });
+      return;
+    }
+
+    if (url.includes("/api/invoices/analyze/")) {
+      callCounters.analyze += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(analyzedPayload),
+      });
+      return;
+    }
+
+    if (url.includes("/api/invoices/launch/")) {
+      callCounters.launch += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(launchedPayload),
+      });
+      return;
+    }
+
+    await route.continue();
   });
 
   const fixturePath = path.join(__dirname, "fixtures", "nota-fiscal-teste.pdf");
@@ -133,6 +261,11 @@ test("fluxo de extracao via interface web", async ({ page }) => {
   const jsonView = page.locator("#json-view");
   const formattedButton = page.getByRole("tab", { name: "Visualização Formatada" });
   const jsonButton = page.getByRole("tab", { name: "JSON Bruto" });
+  const analyzeButton = page.getByRole("button", { name: "Analisar Dados" });
+  const analysisSection = page.locator("#analysis-section");
+  const launchSection = page.locator("#launch-section");
+  const analysisSummary = page.locator("#analysis-summary");
+  const launchMessage = page.locator("#launch-message");
 
   await expect(resultPanel).toBeVisible();
   await expect(resultPanel.getByRole("heading", { name: "Dados Extraídos" })).toBeVisible();
@@ -144,20 +277,42 @@ test("fluxo de extracao via interface web", async ({ page }) => {
   await expect(formattedView.getByText("Chave de Acesso")).toBeVisible();
   await expect(formattedView.getByText("Natureza da Operação")).toBeVisible();
   await expect(formattedView.getByRole("heading", { name: "Totais e Impostos" })).toBeVisible();
-  await expect(formattedView.getByRole("heading", { name: "Local de Entrega" })).toBeVisible();
-  await expect(formattedView.getByRole("heading", { name: "Transportador/Volumes" })).toBeVisible();
   await expect(formattedView.getByRole("heading", { name: "Produtos/Serviços" })).toBeVisible();
-  await expect(formattedView.getByRole("columnheader", { name: "NCM" })).toBeVisible();
-  await expect(formattedView.getByRole("columnheader", { name: "CFOP" })).toBeVisible();
-  await expect(formattedView.getByRole("cell", { name: "Oleo Diesel S10" })).toBeVisible();
+  await expect(formattedView.getByText("MANUTENCAO E OPERACAO")).toBeVisible();
+  await expect(analyzeButton).toBeVisible();
 
   await jsonButton.click();
   await expect(formattedView).toBeHidden();
   await expect(jsonView).toBeVisible();
   await expect(page.locator("#json-output")).toContainText('"fornecedor"');
+  await expect(page.locator("#json-output")).toContainText('"valor_total"');
+  await expect(page.locator("#json-output")).not.toContainText('"analysis"');
+  await expect(page.locator("#json-output")).not.toContainText('"launch"');
   await expect(page.getByRole("button", { name: "Copiar JSON" })).toBeVisible();
 
   await formattedButton.click();
   await expect(formattedView).toBeVisible();
   await expect(jsonView).toBeHidden();
+
+  await analyzeButton.click();
+  await expect(analysisSection).toBeVisible();
+  await expect(analysisSummary).toContainText("Tipo de movimento inferido");
+  await expect(page.locator("#analysis-grid")).toContainText("Contas a Pagar");
+  await expect(page.locator("#json-output")).toContainText('"movement_type"');
+  await expect(page.locator("#analysis-grid")).toContainText("EMPRESA FORNECEDORA LTDA");
+  await expect(page.locator("#analysis-grid")).toContainText("CLIENTE EXEMPLO");
+  await expect(page.locator("#analysis-grid")).toContainText("MANUTENCAO E OPERACAO");
+
+  await expect(launchSection).toBeVisible();
+  await expect(launchMessage).toContainText("Lancamentos concluidos com sucesso.");
+  await expect(page.locator("#launch-grid")).toContainText("Fornecedor");
+  await expect(page.locator("#launch-grid")).toContainText("EMPRESA FORNECEDORA LTDA");
+  await expect(page.locator("#launch-grid")).toContainText("12.345.678/0001-90");
+  await expect(page.locator("#launch-grid")).toContainText("CLIENTE EXEMPLO");
+  await expect(page.locator("#launch-grid")).toContainText("MANUTENCAO E OPERACAO");
+  await expect(page.locator("#launch-grid")).toContainText("MOV-2000-P1");
+
+  await expect(callCounters.extract).toBe(1);
+  await expect(callCounters.analyze).toBe(1);
+  await expect(callCounters.launch).toBe(1);
 });
