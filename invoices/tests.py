@@ -1,4 +1,7 @@
 from __future__ import annotations
+import json
+from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -6,12 +9,17 @@ from unittest.mock import patch
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 
 from invoices.agents.extraction import ExtractionResult
 from invoices.agents import ExpenseClassificationAgent, ValidationAgent
 from invoices.agents.extraction import PdfExtractionAgent
+from invoices.agent_RAG import Agent3
+from invoices.management.commands.seed_demo_invoices import DEMO_PREFIX
+from invoices.gemini_session import validate_gemini_api_key
 from invoices.services import InvoiceExtractionService
 from invoices.models import Classificacao, InvoiceExtraction, MovimentoContas, ParcelaContas, Pessoa
+from invoices.utils import is_valid_cnpj, is_valid_cpf, mask_cep, mask_cnpj, mask_cpf, mask_ie, mask_phone, only_alnum, only_digits
 
 
 MINIMUM_CONTRACT_FIELDS = (
@@ -163,6 +171,74 @@ class InvoiceExtractApiTests(TestCase):
         self.assertEqual(payload["provider"], "mock")
         self.assertIn("fallback_reason", payload)
         self.assertIn("Falha ao usar Gemini", payload["fallback_reason"])
+
+
+@override_settings(GEMINI_API_KEY="")
+class GeminiGateTests(TestCase):
+    def post_pdf(self, text: str, *, filename: str = "nota_fiscal.pdf") -> dict:
+        uploaded_pdf = SimpleUploadedFile(filename, b"%PDF-1.4 mock", content_type="application/pdf")
+        with patch("invoices.agents.extraction.PdfExtractionAgent._read_pdf_text", return_value=text):
+            response = self.client.post(reverse("invoices:extract_invoice"), {"pdf": uploaded_pdf})
+        return response
+
+    def test_index_without_session_key_shows_gate(self) -> None:
+        response = self.client.get(reverse("invoices:index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Informe a chave da API")
+        self.assertContains(response, "A aplicação usa Gemini")
+
+    @patch("invoices.views.validate_gemini_api_key", return_value=(True, ""))
+    def test_gate_stores_key_and_redirects_to_next(self, _mock_validate) -> None:
+        response = self.client.post(
+            reverse("invoices:gemini_gate"),
+            {"api_key": "test-key", "next": "/cadastros/"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "/cadastros/")
+        self.assertEqual(self.client.session.get("gemini_api_key"), "test-key")
+
+    @patch("invoices.views.validate_gemini_api_key", return_value=(False, "Chave invalida."))
+    def test_gate_rejects_invalid_key(self, _mock_validate) -> None:
+        session = self.client.session
+        session["gemini_api_key"] = "old-key"
+        session.save()
+
+        response = self.client.post(
+            reverse("invoices:gemini_gate"),
+            {"api_key": "bad-key", "next": "/"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Chave invalida.")
+        self.assertIsNone(self.client.session.get("gemini_api_key"))
+
+    @patch("google.genai.Client")
+    def test_validate_gemini_api_key_uses_minimal_smoke_call(self, mock_client_cls) -> None:
+        mock_client = mock_client_cls.return_value
+        mock_client.models.generate_content.return_value = object()
+
+        is_valid, error = validate_gemini_api_key("test-key", "gemini-test-model")
+
+        self.assertTrue(is_valid)
+        self.assertEqual(error, "")
+        mock_client.models.generate_content.assert_called_once()
+        _, kwargs = mock_client.models.generate_content.call_args
+        self.assertEqual(kwargs["model"], "gemini-test-model")
+        self.assertEqual(kwargs["contents"], "Responda somente OK.")
+        self.assertEqual(kwargs["config"]["max_output_tokens"], 5)
+        self.assertEqual(kwargs["config"]["temperature"], 0)
+
+    @patch("google.genai.Client")
+    def test_validate_gemini_api_key_rejects_auth_error(self, mock_client_cls) -> None:
+        mock_client = mock_client_cls.return_value
+        mock_client.models.generate_content.side_effect = RuntimeError("400 INVALID_ARGUMENT. API key not valid.")
+
+        is_valid, error = validate_gemini_api_key("bad-key", "gemini-test-model")
+
+        self.assertFalse(is_valid)
+        self.assertEqual(error, "Chave do Gemini invalida. Passe uma chave valida.")
 
     def test_api_returns_success_id_provider_and_data(self) -> None:
         response = self.post_pdf("Compra de óleo diesel")
@@ -621,6 +697,70 @@ class InvoiceExtractionServiceTests(TestCase):
                     "cnpj": "22.222.222/0002-22",
                 },
                 "faturado": {"nome_completo": "CLIENTE GEMINI", "cpf": "333.333.333-33"},
+                "numero_nota_fiscal": "778",
+                "data_emissao": "2024-01-01",
+                "produtos": [{"descricao": "Material sem regra", "quantidade": 1}],
+                "parcelas": [{"numero": 1, "data_vencimento": "2024-02-01", "valor": 100.0}],
+                "valor_total": 100.0,
+                "classificacoes_despesa": [{"categoria": "MANUTENCAO E OPERACAO", "justificativa": "Classificação oficial do Gemini."}],
+            },
+            provider="gemini",
+            usage={"input_tokens": 1200, "output_tokens": 350, "total_tokens": 1550},
+        ),
+    )
+    @override_settings(GEMINI_API_KEY="test-key")
+    def test_extract_response_includes_gemini_usage_metadata(self, _mock_extract) -> None:
+        service = InvoiceExtractionService()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+
+        payload = service.extract(file)
+
+        self.assertEqual(payload["provider"], "gemini")
+        self.assertEqual(payload["metadata"]["usage"]["input_tokens"], 1200)
+        self.assertEqual(payload["metadata"]["usage"]["output_tokens"], 350)
+        self.assertEqual(payload["metadata"]["usage"]["total_tokens"], 1550)
+
+    @patch(
+        "invoices.services.PdfExtractionAgent.extract",
+        return_value=ExtractionResult(
+            data={
+                "fornecedor": {
+                    "razao_social": "FORNECEDORA GEMINI",
+                    "fantasia": "FORNECEDORA",
+                    "cnpj": "22.222.222/0002-22",
+                },
+                "faturado": {"nome_completo": "CLIENTE GEMINI", "cpf": "333.333.333-33"},
+                "numero_nota_fiscal": "779",
+                "data_emissao": "2024-01-01",
+                "produtos": [{"descricao": "Material sem regra", "quantidade": 1}],
+                "parcelas": [{"numero": 1, "data_vencimento": "2024-02-01", "valor": 100.0}],
+                "valor_total": 100.0,
+                "classificacoes_despesa": [{"categoria": "MANUTENCAO E OPERACAO", "justificativa": "Classificação oficial do Gemini."}],
+            },
+            provider="gemini",
+        ),
+    )
+    @override_settings(GEMINI_API_KEY="test-key")
+    def test_extract_response_estimates_usage_when_gemini_metadata_is_missing(self, _mock_extract) -> None:
+        service = InvoiceExtractionService()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+
+        payload = service.extract(file)
+
+        self.assertEqual(payload["provider"], "gemini")
+        self.assertTrue(payload["metadata"]["usage"]["estimated"])
+        self.assertGreater(payload["metadata"]["usage"]["total_tokens"], 0)
+
+    @patch(
+        "invoices.services.PdfExtractionAgent.extract",
+        return_value=ExtractionResult(
+            data={
+                "fornecedor": {
+                    "razao_social": "FORNECEDORA GEMINI",
+                    "fantasia": "FORNECEDORA",
+                    "cnpj": "22.222.222/0002-22",
+                },
+                "faturado": {"nome_completo": "CLIENTE GEMINI", "cpf": "333.333.333-33"},
                 "numero_nota_fiscal": "777",
                 "data_emissao": "2024-01-01",
                 "produtos": [{"descricao": "Material sem regra", "quantidade": 1}],
@@ -740,6 +880,29 @@ class PdfExtractionAgentTests(TestCase):
         self.assertEqual(result.data, gemini_data)
 
     @override_settings(GEMINI_API_KEY="test-key")
+    def test_extract_with_gemini_usage_metadata_returns_token_debug(self) -> None:
+        agent = PdfExtractionAgent()
+        file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
+        gemini_data = {
+            "fornecedor": {"razao_social": "FORNECEDORA GEMINI", "fantasia": "FORNECEDORA", "cnpj": "22.222.222/0002-22"},
+            "faturado": {"nome_completo": "CLIENTE GEMINI", "cpf": "333.333.333-33"},
+            "numero_nota_fiscal": "777",
+            "data_emissao": "2024-01-01",
+            "produtos": [{"descricao": "Material sem regra", "quantidade": 1}],
+            "parcelas": [{"numero": 1, "data_vencimento": "2024-02-01", "valor": 100.0}],
+            "valor_total": 100.0,
+            "classificacoes_despesa": [{"categoria": "MANUTENCAO E OPERACAO", "justificativa": "Classificacao oficial."}],
+        }
+        usage = {"input_tokens": 1200, "output_tokens": 350, "total_tokens": 1550}
+
+        with patch.object(agent, "_read_pdf_text", return_value="Nota Fiscal Gemini"), \
+            patch.object(agent, "_extract_with_gemini", return_value=(gemini_data, usage)):
+            result = agent.extract(file)
+
+        self.assertEqual(result.provider, "gemini")
+        self.assertEqual(result.usage, usage)
+
+    @override_settings(GEMINI_API_KEY="test-key")
     def test_extract_with_gemini_failure_uses_mock_with_safe_fallback_reason(self) -> None:
         agent = PdfExtractionAgent()
         file = SimpleUploadedFile("nota_fiscal.pdf", b"%PDF-1.4 mock", content_type="application/pdf")
@@ -754,6 +917,142 @@ class PdfExtractionAgentTests(TestCase):
         self.assertIn("modelo indisponivel", result.fallback_reason)
         self.assertNotIn("test-key", result.fallback_reason)
         self.assertIn("fornecedor", result.data)
+
+    def test_usage_payload_normalizes_gemini_usage_metadata(self) -> None:
+        usage = SimpleNamespace(prompt_token_count=1200, candidates_token_count=350, total_token_count=1550)
+
+        payload = PdfExtractionAgent()._usage_payload(usage)
+
+        self.assertEqual(payload["input_tokens"], 1200)
+        self.assertEqual(payload["output_tokens"], 350)
+        self.assertEqual(payload["total_tokens"], 1550)
+
+    def test_usage_payload_accepts_pydantic_camel_case_metadata(self) -> None:
+        usage = SimpleNamespace(
+            model_dump=lambda: {
+                "promptTokenCount": 1200,
+                "candidatesTokenCount": 350,
+            }
+        )
+
+        payload = PdfExtractionAgent()._usage_payload(usage)
+
+        self.assertEqual(payload["input_tokens"], 1200)
+        self.assertEqual(payload["output_tokens"], 350)
+        self.assertEqual(payload["total_tokens"], 1550)
+
+    def test_response_usage_metadata_reads_model_dump(self) -> None:
+        response = SimpleNamespace(
+            model_dump=lambda: {
+                "usageMetadata": {
+                    "promptTokenCount": 900,
+                    "candidatesTokenCount": 100,
+                    "totalTokenCount": 1000,
+                }
+            }
+        )
+
+        usage = PdfExtractionAgent()._usage_payload(PdfExtractionAgent()._response_usage_metadata(response))
+
+        self.assertEqual(usage["input_tokens"], 900)
+        self.assertEqual(usage["output_tokens"], 100)
+        self.assertEqual(usage["total_tokens"], 1000)
+        self.assertFalse(usage["estimated"])
+
+    def test_extract_with_gemini_estimates_usage_when_sdk_omits_metadata(self) -> None:
+        agent = PdfExtractionAgent()
+        gemini_data = {"fornecedor": {"razao_social": "CTVA"}, "produtos": []}
+
+        with patch.object(agent, "_gemini_response_payload", return_value=(gemini_data, {})), \
+            patch("google.genai.Client") as mock_client:
+            mock_client.return_value.models.generate_content.return_value = SimpleNamespace()
+            data, usage = agent._extract_with_gemini("Nota fiscal CTVA")
+
+        self.assertEqual(data, gemini_data)
+        self.assertGreater(usage["input_tokens"], 0)
+        self.assertGreater(usage["output_tokens"], 0)
+        self.assertGreater(usage["total_tokens"], 0)
+        self.assertTrue(usage["estimated"])
+
+    @override_settings(GEMINI_EXTRACTION_MAX_OUTPUT_TOKENS=8192)
+    def test_gemini_config_requests_json_response(self) -> None:
+        config = PdfExtractionAgent()._gemini_config()
+
+        self.assertEqual(config["response_mime_type"], "application/json")
+        self.assertEqual(config["temperature"], 0)
+        self.assertEqual(config["max_output_tokens"], 8192)
+        self.assertIn("response_json_schema", config)
+        self.assertIn("fornecedor", config["response_json_schema"]["required"])
+
+    def test_gemini_response_payload_uses_structured_parsed_response(self) -> None:
+        parsed = {"fornecedor": {"razao_social": "ELBA CALCARIO LTDA"}}
+        usage = SimpleNamespace(prompt_token_count=100, candidates_token_count=20, total_token_count=120)
+        response = SimpleNamespace(parsed=parsed, text="", usage_metadata=usage)
+
+        payload, usage_payload = PdfExtractionAgent()._gemini_response_payload(response)
+
+        self.assertEqual(payload, parsed)
+        self.assertEqual(usage_payload["total_tokens"], 120)
+
+    def test_gemini_response_payload_uses_pydantic_like_parsed_response(self) -> None:
+        parsed = SimpleNamespace(model_dump=lambda: {"fornecedor": {"razao_social": "ELBA CALCARIO LTDA"}})
+        response = SimpleNamespace(parsed=parsed, text="", usage_metadata=None)
+
+        payload, usage_payload = PdfExtractionAgent()._gemini_response_payload(response)
+
+        self.assertEqual(payload["fornecedor"]["razao_social"], "ELBA CALCARIO LTDA")
+        self.assertEqual(usage_payload, {})
+
+    def test_gemini_response_payload_reads_candidate_parts_when_text_is_empty(self) -> None:
+        part = SimpleNamespace(text='{"fornecedor": {"razao_social": "ELBA CALCARIO LTDA"}}')
+        content = SimpleNamespace(parts=[part])
+        candidate = SimpleNamespace(content=content, finish_reason="STOP")
+        response = SimpleNamespace(parsed=None, text="", candidates=[candidate], usage_metadata=None)
+
+        payload, _usage_payload = PdfExtractionAgent()._gemini_response_payload(response)
+
+        self.assertEqual(payload["fornecedor"]["razao_social"], "ELBA CALCARIO LTDA")
+
+    def test_parse_json_accepts_valid_object_before_extra_text(self) -> None:
+        payload = PdfExtractionAgent()._parse_json('{"fornecedor": {"razao_social": "ELBA"}}\ntexto extra')
+
+        self.assertEqual(payload["fornecedor"]["razao_social"], "ELBA")
+
+    def test_parse_json_repairs_trailing_commas(self) -> None:
+        payload = PdfExtractionAgent()._parse_json('{"fornecedor": {"razao_social": "ELBA",}, "produtos": [],}')
+
+        self.assertEqual(payload["fornecedor"]["razao_social"], "ELBA")
+        self.assertEqual(payload["produtos"], [])
+
+    def test_parse_json_repairs_missing_comma_between_array_objects(self) -> None:
+        payload = PdfExtractionAgent()._parse_json(
+            '{"parcelas": [{"numero": 1, "valor": 163520.00} {"numero": 2, "valor": 38356.54}]}'
+        )
+
+        self.assertEqual(len(payload["parcelas"]), 2)
+        self.assertEqual(payload["parcelas"][1]["valor"], 38356.54)
+
+    def test_parse_json_repairs_missing_comma_between_fields(self) -> None:
+        payload = PdfExtractionAgent()._parse_json(
+            '{"fornecedor": {"razao_social": "CTVA"} "parcelas": [{"numero": 1, "valor": 163520.00}]}'
+        )
+
+        self.assertEqual(payload["fornecedor"]["razao_social"], "CTVA")
+        self.assertEqual(payload["parcelas"][0]["valor"], 163520.0)
+
+    def test_parse_json_repairs_truncated_array_suffix(self) -> None:
+        payload = PdfExtractionAgent()._parse_json(
+            '{"fornecedor": {"razao_social": "CTVA"}, "valor_total": 201876.54, '
+            '"parcelas": [{"numero": 1, "data_vencimento": "2025-05-05", "valor": 163520.00}'
+        )
+
+        self.assertEqual(payload["fornecedor"]["razao_social"], "CTVA")
+        self.assertEqual(payload["parcelas"][0]["valor"], 163520.0)
+
+    def test_parse_json_repairs_truncated_string_suffix(self) -> None:
+        payload = PdfExtractionAgent()._parse_json('{"fornecedor": {"razao_social": "CTVA')
+
+        self.assertEqual(payload["fornecedor"]["razao_social"], "CTVA")
 
     @staticmethod
     def _extract_text_from_local_pdf_file(filename: str) -> str:
@@ -884,6 +1183,713 @@ class ExpenseClassificationAgentTests(TestCase):
         result = self.classifier.classify([{"descricao": "Big bag e sacaria para armazenagem pós-colheita"}])
         self.assertEqual(result[0]["categoria"], "ARMAZENAGEM E POS-COLHEITA")
         self.assertIn("big bag", result[0]["justificativa"].lower())
+
+
+@override_settings(GEMINI_API_KEY="")
+class RAGAgentTests(TestCase):
+    def setUp(self) -> None:
+        session = self.client.session
+        session["gemini_api_key"] = "test-key"
+        session.save()
+
+        self.fornecedor = Pessoa.objects.create(
+            razao_social="FORNECEDOR RAG",
+            cnpj="11111111000111",
+            is_fornecedor=True,
+        )
+        self.faturado = Pessoa.objects.create(
+            razao_social="CLIENTE RAG",
+            cpf="22222222222",
+            is_faturado=True,
+        )
+        self.classificacao = Classificacao.objects.create(
+            tipo=Classificacao.Tipo.DESPESA,
+            descricao="MANUTENCAO E OPERACAO",
+        )
+        self.receita = Classificacao.objects.create(
+            tipo=Classificacao.Tipo.RECEITA,
+            descricao="RECEITA OPERACIONAL",
+        )
+        self.insumos = Classificacao.objects.create(
+            tipo=Classificacao.Tipo.DESPESA,
+            descricao="INSUMOS AGRICOLAS",
+        )
+        self.movimento = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.APAGAR,
+            pessoa=self.fornecedor,
+            faturado=self.faturado,
+            numero_documento="RAG-001",
+            data_emissao=date(2024, 1, 15),
+            valor_total=Decimal("1500.00"),
+            dados_extraidos={"produtos": [{"descricao": "Oleo Diesel S10"}]},
+        )
+        self.movimento.classificacoes.add(self.classificacao)
+        self.movimento_receber = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.ARECEBER,
+            pessoa=self.fornecedor,
+            faturado=self.faturado,
+            numero_documento="RAG-002",
+            data_emissao=date(2024, 1, 20),
+            valor_total=Decimal("2500.00"),
+            dados_extraidos={"produtos": [{"descricao": "Servico de consultoria"}]},
+        )
+        self.movimento_receber.classificacoes.add(self.receita)
+        ParcelaContas.objects.create(
+            movimento=self.movimento,
+            identificacao="MOV-RAG-P1",
+            numero=1,
+            data_vencimento=date(2024, 2, 15),
+            valor=Decimal("1500.00"),
+        )
+        ParcelaContas.objects.create(
+            movimento=self.movimento_receber,
+            identificacao="MOV-RAG-P2",
+            numero=1,
+            data_vencimento=date(2024, 2, 20),
+            valor=Decimal("2500.00"),
+        )
+        beltrano = Pessoa.objects.create(
+            razao_social="BELTRANO DE SOUZA",
+            cpf="11111111111",
+            is_faturado=True,
+        )
+        supplier_2025 = Pessoa.objects.create(
+            razao_social="FORNECEDOR 2025",
+            cnpj="33333333000133",
+            is_fornecedor=True,
+        )
+        supplier_2025_top = Pessoa.objects.create(
+            razao_social="FORNECEDOR MAIOR 2025",
+            cnpj="44444444000144",
+            is_fornecedor=True,
+        )
+        self.movimento_2025_a = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.APAGAR,
+            pessoa=supplier_2025,
+            faturado=beltrano,
+            numero_documento="RAG-2025-A",
+            data_emissao=date(2025, 3, 10),
+            valor_total=Decimal("1000.00"),
+            dados_extraidos={"produtos": [{"descricao": "Correia de transmissao e rolamento do eixo"}]},
+        )
+        self.movimento_2025_a.classificacoes.add(self.classificacao)
+        self.movimento_2025_b = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.APAGAR,
+            pessoa=supplier_2025_top,
+            faturado=beltrano,
+            numero_documento="RAG-2025-B",
+            data_emissao=date(2025, 4, 10),
+            valor_total=Decimal("3500.00"),
+            dados_extraidos={"produtos": [{"descricao": "Fungicida para ferrugem asiatica"}]},
+        )
+        self.movimento_2025_b.classificacoes.add(self.insumos)
+        ParcelaContas.objects.create(
+            movimento=self.movimento_2025_a,
+            identificacao="RAG-2025-A-P1",
+            numero=1,
+            data_vencimento=date(2025, 8, 15),
+            valor=Decimal("1000.00"),
+        )
+        ParcelaContas.objects.create(
+            movimento=self.movimento_2025_b,
+            identificacao="RAG-2025-B-P1",
+            numero=1,
+            data_vencimento=date(2025, 9, 15),
+            valor=Decimal("3500.00"),
+        )
+        InvoiceExtraction.objects.create(
+            file_name="nota-rag.pdf",
+            file_size=123,
+            provider="mock",
+            status=InvoiceExtraction.Status.SUCCESS,
+            result_json={
+                "numero_nota_fiscal": "RAG-001",
+                "data_emissao": "2024-01-15",
+                "fornecedor": {"razao_social": "FORNECEDOR RAG"},
+                "faturado": {"nome_completo": "CLIENTE RAG"},
+                "produtos": [{"descricao": "Oleo Diesel S10"}],
+                "parcelas": [{"numero": 1, "data_vencimento": "2024-02-15", "valor": 1500.0}],
+                "valor_total": 1500.0,
+                "classificacoes_despesa": [{"categoria": "MANUTENCAO E OPERACAO", "justificativa": "diesel"}],
+            },
+        )
+
+    def _source_by_id(self, payload: dict, source_id: str) -> dict:
+        return next(source for source in payload["sources"] if source["source"] == source_id)
+
+    def _row_value(self, source: dict, field: str) -> str:
+        return next(row["valor"] for row in source["rows"] if row["campo"] == field)
+
+    def test_simple_rag_returns_database_sources_and_local_answer(self) -> None:
+        payload = Agent3().run_query("Qual nota de diesel esta em contas a pagar?", "simple")
+        payable_summary = self._source_by_id(payload, "Analitico:APAGAR:Resumo")
+
+        self.assertEqual(payload["mode"], "simple")
+        self.assertEqual(payload["intent"], "exploratoria")
+        self.assertEqual(payload["provider"], "local")
+        self.assertIn("RAG simples", payload["answer"])
+        self.assertEqual(payload["context_usage"]["status"], "OTIMO")
+        self.assertEqual(self._row_value(payable_summary, "Total"), "R$ 6000.00")
+        self.assertEqual(payable_summary["score_status"], "ALTO")
+        self.assertTrue(payload["sources"])
+        self.assertTrue(payload["answer_documents"])
+        self.assertTrue(payload["summary_sources"])
+        self.assertTrue(payload["evidence_sources"])
+        self.assertTrue(any("RAG-001" in source["content"] for source in payload["evidence_sources"]))
+
+    def test_embeddings_rag_returns_semantic_sources(self) -> None:
+        payload = Agent3().run_query("Qual total de contas a pagar?", "embeddings")
+        payable_summary = self._source_by_id(payload, "Analitico:APAGAR:Resumo")
+
+        self.assertEqual(payload["mode"], "embeddings")
+        self.assertEqual(payload["intent"], "financeira_agregada")
+        self.assertEqual(payload["provider"], "local")
+        self.assertIn("RAG com embeddings", payload["answer"])
+        self.assertLessEqual(payload["context_usage"]["document_count"], 3)
+        self.assertEqual(self._row_value(payable_summary, "Total"), "R$ 6000.00")
+        self.assertEqual(payable_summary["score_status"], "ALTO")
+        self.assertTrue(payload["sources"])
+        self.assertTrue(payload["evidence_sources"])
+
+    def test_payable_and_receivable_totals_are_consistent_across_modes(self) -> None:
+        simple_payable = Agent3().run_query("total de contas a pagar", "simple")
+        embedding_payable = Agent3().run_query("total de contas a pagar", "embeddings")
+        simple_receivable = Agent3().run_query("total de contas a receber", "simple")
+        embedding_receivable = Agent3().run_query("total de contas a receber", "embeddings")
+
+        self.assertEqual(self._row_value(self._source_by_id(simple_payable, "Analitico:APAGAR:Resumo"), "Total"), "R$ 6000.00")
+        self.assertEqual(self._row_value(self._source_by_id(embedding_payable, "Analitico:APAGAR:Resumo"), "Total"), "R$ 6000.00")
+        self.assertEqual(self._row_value(self._source_by_id(simple_receivable, "Analitico:ARECEBER:Resumo"), "Total"), "R$ 2500.00")
+        self.assertEqual(self._row_value(self._source_by_id(embedding_receivable, "Analitico:ARECEBER:Resumo"), "Total"), "R$ 2500.00")
+
+    @patch(
+        "invoices.views.Agent3.run_query",
+        return_value={
+            "mode": "simple",
+            "provider": "local",
+            "usage": {"total_tokens": 0, "input_tokens": 0, "output_tokens": 0},
+            "context_usage": {"status": "OTIMO", "document_count": 1, "estimated_input_tokens": 10, "intent": "exploratoria"},
+            "answer": "Resposta de teste.",
+            "answer_documents": [
+                {
+                    "title": "Resumo",
+                    "source": "MovimentoContas:1",
+                    "score": 1,
+                    "score_label": "ALTO",
+                    "score_status": "ALTO",
+                    "rows": [{"campo": "Documento", "valor": "RAG-001"}],
+                    "content": "Resumo",
+                }
+            ],
+            "sources": [{"source": "MovimentoContas:1", "title": "Resumo", "rows": []}],
+            "summary_sources": [{"source": "MovimentoContas:1"}],
+            "evidence_sources": [{"source": "MovimentoContas:1", "content": "RAG-001"}],
+        },
+    )
+    def test_rag_query_view_renders_answer(self, _mock_run_query) -> None:
+        response = self.client.get(
+            reverse("invoices:rag_query"),
+            {"query": "Quais movimentos existem?", "mode": "simple"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Resposta do Agente")
+        self.assertContains(response, "FORNECEDOR RAG")
+        self.assertContains(response, "Resumo do que foi usado pelo agente")
+        self.assertContains(response, "Status do Score")
+        self.assertContains(response, "Mostrar mais resumos")
+        self.assertContains(response, "Documentos do banco")
+        self.assertContains(response, "Mais detalhes")
+        self.assertContains(response, "rag-movement-catalog")
+        self.assertContains(response, "Cadastros")
+        self.assertContains(response, "Carregando RAG")
+        self.assertNotContains(response, "Documentos recuperados")
+
+    def test_rag_adds_yearly_invoice_supplier_analytics(self) -> None:
+        payload = Agent3().run_query("Qual foi o valor total pago em Notas Fiscais emitidas no ano de 2025, e qual foi o fornecedor responsável pelo maior valor nesse período?", "simple")
+        source = self._source_by_id(payload, "Analitico:Notas:2025:APAGAR")
+
+        self.assertEqual(payload["intent"], "financeira_filtrada")
+        self.assertEqual(self._row_value(source, "Valor total"), "R$ 4500.00")
+        self.assertEqual(self._row_value(source, "Fornecedor maior valor"), "FORNECEDOR MAIOR 2025")
+        self.assertEqual(self._row_value(source, "Valor do fornecedor"), "R$ 3500.00")
+
+    def test_rag_adds_billed_installments_year_analytics(self) -> None:
+        payload = Agent3().run_query("Para o Faturado 'BELTRANO DE SOUZA' (CPF 111.111.111-11), qual é a soma total dos valores das parcelas que ainda vencerão dentro do ano de 2025?", "simple")
+        source = self._source_by_id(payload, "Analitico:Parcelas:2025:11111111111")
+
+        self.assertEqual(payload["intent"], "financeira_filtrada")
+        self.assertEqual(self._row_value(source, "Total das parcelas"), "R$ 4500.00")
+        self.assertEqual(self._row_value(source, "Quantidade de parcelas"), "2")
+
+    def test_rag_adds_semantic_product_analytics(self) -> None:
+        payload = Agent3().run_query(
+            "Existem Notas Fiscais classificadas como MANUTENCAO E OPERACAO cujos itens se assemelham a pecas de reposicao, correias ou rolamentos?",
+            "embeddings",
+        )
+        source = self._source_by_id(payload, "Analitico:Semantico:MANUTENCAO E OPERACAO")
+
+        self.assertEqual(payload["intent"], "semantica")
+        self.assertEqual(self._row_value(source, "Notas compatíveis"), "1")
+        self.assertIn("Correia de transmissao", source["content"] + str(source["rows"]))
+
+    def test_rag_adds_largest_insumos_invoice_analytics(self) -> None:
+        payload = Agent3().run_query("Qual é a despesa de 'INSUMOS AGRÍCOLAS' que tem o maior valor de Nota Fiscal total, e que tipo de 'pragas e doenças' o item se destina a combater, de acordo com o nome do produto?", "embeddings")
+        source = self._source_by_id(payload, "Analitico:MaiorNota:INSUMOS AGRICOLAS")
+
+        self.assertEqual(payload["intent"], "semantica")
+        self.assertEqual(self._row_value(source, "Nota"), "RAG-2025-B")
+        self.assertEqual(self._row_value(source, "Valor total"), "R$ 3500.00")
+        self.assertEqual(self._row_value(source, "Pragas/doenças inferidas"), "doenças fúngicas")
+
+    def test_rag_yearly_invoice_analytics_deduplicates_reimported_notes(self) -> None:
+        duplicate = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.APAGAR,
+            pessoa=self.movimento_2025_b.pessoa,
+            faturado=self.movimento_2025_b.faturado,
+            numero_documento="RAG-2025-B-2",
+            data_emissao=self.movimento_2025_b.data_emissao,
+            valor_total=self.movimento_2025_b.valor_total,
+            dados_extraidos=self.movimento_2025_b.dados_extraidos,
+        )
+        duplicate.classificacoes.add(self.insumos)
+
+        payload = Agent3().run_query(
+            "Qual foi o valor total pago em Notas Fiscais emitidas no ano de 2025, e qual foi o fornecedor responsável pelo maior valor nesse período?",
+            "simple",
+        )
+        source = self._source_by_id(payload, "Analitico:Notas:2025:APAGAR")
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertIn("duplicadas por reimportação", payload["answer"])
+        self.assertEqual(self._row_value(source, "Quantidade de notas"), "2")
+        self.assertEqual(self._row_value(source, "Valor total"), "R$ 4500.00")
+        self.assertEqual(self._row_value(source, "Fornecedor maior valor"), "FORNECEDOR MAIOR 2025")
+
+    def test_rag_billed_installments_filter_by_cpf_and_deduplicate_reimports(self) -> None:
+        duplicate = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.ARECEBER,
+            pessoa=self.movimento_2025_b.pessoa,
+            faturado=self.movimento_2025_b.faturado,
+            numero_documento="RAG-2025-B-9",
+            data_emissao=self.movimento_2025_b.data_emissao,
+            valor_total=self.movimento_2025_b.valor_total,
+            dados_extraidos=self.movimento_2025_b.dados_extraidos,
+        )
+        duplicate.classificacoes.add(self.insumos)
+        ParcelaContas.objects.create(
+            movimento=duplicate,
+            identificacao="RAG-2025-B-DUP-P1",
+            numero=1,
+            data_vencimento=date(2025, 9, 15),
+            valor=Decimal("3500.00"),
+        )
+
+        payload = Agent3().run_query(
+            "Para o Faturado BELTRANO DE SOUZA CPF 111.111.111-11, qual é a soma total dos valores das parcelas que ainda vencerão dentro do ano de 2025?",
+            "simple",
+        )
+        source = self._source_by_id(payload, "Analitico:Parcelas:2025:11111111111")
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertEqual(self._row_value(source, "Faturado encontrado"), "BELTRANO DE SOUZA")
+        self.assertEqual(self._row_value(source, "Quantidade de parcelas"), "2")
+        self.assertEqual(self._row_value(source, "Total das parcelas"), "R$ 4500.00")
+
+    def test_rag_billed_installments_can_filter_by_faturado_name_without_document(self) -> None:
+        payload = Agent3().run_query(
+            "Para o Faturado BELTRANO DE SOUZA, qual é a soma total dos valores das parcelas que ainda vencerão dentro do ano de 2025?",
+            "simple",
+        )
+        source = self._source_by_id(payload, "Analitico:Parcelas:2025:beltrano-de-souza")
+
+        self.assertEqual(self._row_value(source, "Faturado/documento consultado"), "BELTRANO DE SOUZA")
+        self.assertEqual(self._row_value(source, "Total das parcelas"), "R$ 4500.00")
+
+    def test_rag_semantic_maintenance_does_not_match_limestone_without_requested_terms(self) -> None:
+        self.movimento_2025_a.dados_extraidos = {"produtos": [{"descricao": "Calcario agricola para melhorar o solo"}]}
+        self.movimento_2025_a.save(update_fields=["dados_extraidos"])
+
+        payload = Agent3().run_query(
+            "Existem Notas Fiscais classificadas como MANUTENCAO E OPERACAO cujos itens se assemelham a produtos usados para melhorar o solo, como corretivos ou neutralizadores?",
+            "embeddings",
+        )
+        source = self._source_by_id(payload, "Analitico:Semantico:MANUTENCAO E OPERACAO")
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertEqual(self._row_value(source, "Notas compatíveis"), "0")
+        self.assertNotIn("calcário por aproximação", payload["answer"])
+
+    def test_rag_largest_insumos_reports_targeted_note_when_largest_has_no_pest_target(self) -> None:
+        fertilizer = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.APAGAR,
+            pessoa=self.movimento_2025_b.pessoa,
+            faturado=self.movimento_2025_b.faturado,
+            numero_documento="RAG-FERT-2025",
+            data_emissao=date(2025, 5, 10),
+            valor_total=Decimal("8000.00"),
+            dados_extraidos={"produtos": [{"descricao": "Fertilizante NPK 15-15-15"}]},
+        )
+        fertilizer.classificacoes.add(self.insumos)
+
+        payload = Agent3().run_query(
+            "Qual é a despesa de INSUMOS AGRICOLAS que tem o maior valor de Nota Fiscal total, e que tipo de pragas e doenças o item se destina a combater, de acordo com o nome do produto?",
+            "embeddings",
+        )
+        source = self._source_by_id(payload, "Analitico:MaiorNota:INSUMOS AGRICOLAS")
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertEqual(self._row_value(source, "Nota"), "RAG-FERT-2025")
+        self.assertEqual(self._row_value(source, "Pragas/doenças inferidas"), "Não identificado pelo nome do produto")
+        self.assertEqual(self._row_value(source, "Maior nota com alvo fitossanitário"), "RAG-2025-B")
+        self.assertEqual(self._row_value(source, "Alvo fitossanitário inferido"), "doenças fúngicas")
+        self.assertIn("não deve inventar alvo fitossanitário", payload["answer"])
+
+    def test_rag_document_detail_query_uses_explicit_references_instead_of_largest_summary(self) -> None:
+        payload = Agent3().run_query(
+            "Descreva a parcela 000.005.531, e a 000.012.773. Descreva em detalhes as pragas e doenças que os itens combatem, e se faz mal aos seres humanos.",
+            "embeddings",
+        )
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertIn("Detalhamento das notas solicitadas", payload["answer"])
+        self.assertIn("000.005.531", payload["answer"])
+        self.assertIn("não encontrei uma nota ativa com esse número", payload["answer"])
+        self.assertNotIn("A maior nota classificada como INSUMOS AGRICOLAS", payload["answer"])
+
+    def test_rag_can_describe_explicit_invoice_number(self) -> None:
+        invoice = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.APAGAR,
+            pessoa=self.movimento_2025_b.pessoa,
+            faturado=self.movimento_2025_b.faturado,
+            numero_documento="000005531",
+            data_emissao=date(2025, 2, 15),
+            valor_total=Decimal("7050.00"),
+            dados_extraidos={"produtos": [{"descricao": "Correia de transmissao, rolamento e filtro de oleo"}]},
+        )
+        invoice.classificacoes.add(self.classificacao)
+
+        payload = Agent3().run_query("Poderia descrever a nota 000005531?", "embeddings")
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertIn("000005531", payload["answer"])
+        self.assertIn("Detalhamento das notas solicitadas", payload["answer"])
+        self.assertIn("CORREIA", payload["answer"].upper())
+        self.assertNotIn("não é possível descrever", payload["answer"])
+
+    def test_rag_supplier_invoice_listing_deduplicates_reimports(self) -> None:
+        duplicate = MovimentoContas.objects.create(
+            tipo=MovimentoContas.Tipo.APAGAR,
+            pessoa=self.movimento_2025_b.pessoa,
+            faturado=self.movimento_2025_b.faturado,
+            numero_documento="RAG-2025-B-2",
+            data_emissao=self.movimento_2025_b.data_emissao,
+            valor_total=self.movimento_2025_b.valor_total,
+            dados_extraidos=self.movimento_2025_b.dados_extraidos,
+        )
+        duplicate.classificacoes.add(self.insumos)
+
+        payload = Agent3().run_query("Cite as notas fiscais do fornecedor FORNECEDOR MAIOR 2025", "simple")
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertIn("RAG-2025-B", payload["answer"])
+        self.assertNotIn("RAG-2025-B-2", payload["answer"])
+
+    def test_rag_supplier_invoice_details_do_not_use_raw_extraction_duplicates(self) -> None:
+        InvoiceExtraction.objects.create(
+            file_name="duplicada.pdf",
+            file_size=123,
+            provider="mock",
+            status=InvoiceExtraction.Status.SUCCESS,
+            result_json={
+                "numero_nota_fiscal": "RAG-2025-B",
+                "fornecedor": {"razao_social": "FORNECEDOR MAIOR 2025"},
+            },
+        )
+
+        payload = Agent3().run_query("Descreva em detalhes as notas fiscais do fornecedor FORNECEDOR MAIOR 2025", "simple")
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertIn("RAG-2025-B", payload["answer"])
+        self.assertNotIn("Extração", payload["answer"])
+
+    def test_rag_can_list_installments_by_billed_person_without_year(self) -> None:
+        payload = Agent3().run_query("Cite as parcelas do Faturado BELTRANO DE SOUZA CPF 111.111.111-11", "simple")
+
+        self.assertEqual(payload["provider"], "local")
+        self.assertIn("BELTRANO DE SOUZA", payload["answer"])
+        self.assertIn("RAG-2025-A-P1", payload["answer"])
+        self.assertIn("RAG-2025-B-P1", payload["answer"])
+
+
+class SeedDemoInvoicesCommandTests(TestCase):
+    def test_seed_demo_invoices_creates_requested_database_volume(self) -> None:
+        call_command("seed_demo_invoices", count=200)
+
+        extractions = InvoiceExtraction.objects.filter(file_name__startswith=DEMO_PREFIX.lower())
+        movements = MovimentoContas.objects.filter(numero_documento__startswith=DEMO_PREFIX)
+
+        self.assertEqual(extractions.count(), 200)
+        self.assertEqual(movements.count(), 200)
+        self.assertEqual(extractions.filter(movimento__isnull=False).count(), 200)
+        self.assertGreaterEqual(ParcelaContas.objects.filter(movimento__in=movements).count(), 200)
+        self.assertTrue(movements.filter(tipo=MovimentoContas.Tipo.APAGAR).exists())
+        self.assertTrue(movements.filter(tipo=MovimentoContas.Tipo.ARECEBER).exists())
+
+    def test_seed_demo_invoices_is_idempotent_without_reset(self) -> None:
+        call_command("seed_demo_invoices", count=12)
+        call_command("seed_demo_invoices", count=12)
+
+        self.assertEqual(InvoiceExtraction.objects.filter(file_name__startswith=DEMO_PREFIX.lower()).count(), 12)
+        self.assertEqual(MovimentoContas.objects.filter(numero_documento__startswith=DEMO_PREFIX).count(), 12)
+
+
+class DocumentUtilsTests(TestCase):
+    def test_cpf_cnpj_cep_masks_and_validation(self) -> None:
+        self.assertEqual(only_digits("529.982.247-25"), "52998224725")
+        self.assertEqual(only_alnum("61.UV0.OYL/0001-96"), "61UV0OYL000196")
+        self.assertTrue(is_valid_cpf("529.982.247-25"))
+        self.assertFalse(is_valid_cpf("111.111.111-11"))
+        self.assertTrue(is_valid_cnpj("11.222.333/0001-81"))
+        self.assertTrue(is_valid_cnpj("61.UV0.OYL/0001-96"))
+        self.assertFalse(is_valid_cnpj("11.111.111/1111-11"))
+        self.assertEqual(mask_cpf("52998224725"), "529.982.247-25")
+        self.assertEqual(mask_cnpj("11222333000181"), "11.222.333/0001-81")
+        self.assertEqual(mask_cnpj("61UV0OYL000196"), "61.UV0.OYL/0001-96")
+        self.assertEqual(mask_cep("58400000"), "58400-000")
+        self.assertEqual(mask_ie("123456789012"), "123.456.789.012")
+        self.assertEqual(mask_phone("8333330000"), "(83) 3333-0000")
+
+
+class Stage4ManageApiTests(TestCase):
+    def setUp(self) -> None:
+        session = self.client.session
+        session["gemini_api_key"] = "test-key"
+        session.save()
+
+        self.supplier = Pessoa.objects.create(
+            razao_social="FORNECEDOR API",
+            cnpj="12000111000190",
+            municipio="Joao Pessoa",
+            uf="PB",
+            is_fornecedor=True,
+        )
+        self.billed = Pessoa.objects.create(
+            razao_social="FATURADO API",
+            cpf="12345678901",
+            municipio="Campina Grande",
+            uf="PB",
+            is_faturado=True,
+        )
+        self.classification = Classificacao.objects.create(
+            tipo=Classificacao.Tipo.DESPESA,
+            descricao="INSUMOS AGRICOLAS",
+        )
+
+    def _post_json(self, url: str, payload: dict):
+        return self.client.post(url, data=json.dumps(payload), content_type="application/json")
+
+    def test_manage_page_renders_tables_without_preloading_records(self) -> None:
+        response = self.client.get(reverse("invoices:manage_records"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Cadastros")
+        self.assertContains(response, "Use Buscar para carregar registros ativos.")
+        self.assertNotContains(response, "Todos ativos")
+
+        api_response = self.client.get(reverse("invoices:manage_collection", args=["pessoas"]))
+        self.assertEqual(api_response.status_code, 200)
+        self.assertEqual(api_response.json()["results"], [])
+
+        all_response = self.client.get(reverse("invoices:manage_collection", args=["pessoas"]), {"all": "1"})
+        self.assertEqual(len(all_response.json()["results"]), 2)
+
+    def test_people_create_search_multiple_terms_and_logical_delete(self) -> None:
+        response = self._post_json(
+            reverse("invoices:manage_collection", args=["pessoas"]),
+            {
+                "razao_social": "CLIENTE MULTI BUSCA",
+                "cpf": "529.982.247-25",
+                "municipio": "Joao Pessoa",
+                "uf": "PB",
+                "is_cliente": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        created = Pessoa.objects.get(cpf="52998224725")
+        self.assertTrue(created.ativo)
+        self.assertTrue(created.is_cliente)
+        self.assertFalse(created.is_faturado)
+
+        search_response = self.client.get(
+            reverse("invoices:manage_collection", args=["pessoas"]),
+            {"q": "CLIENTE Pessoa", "order": "razao_social"},
+        )
+        self.assertEqual(len(search_response.json()["results"]), 1)
+        self.assertEqual(search_response.json()["results"][0]["razao_social"], "CLIENTE MULTI BUSCA")
+
+        delete_response = self.client.delete(reverse("invoices:manage_detail", args=["pessoas", created.id]))
+        created.refresh_from_db()
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertFalse(created.ativo)
+
+        all_response = self.client.get(reverse("invoices:manage_collection", args=["pessoas"]), {"all": "1"})
+        self.assertNotIn(created.id, [item["id"] for item in all_response.json()["results"]])
+
+    def test_people_reject_missing_document_or_role(self) -> None:
+        missing_document = self._post_json(
+            reverse("invoices:manage_collection", args=["pessoas"]),
+            {"razao_social": "PESSOA SEM DOCUMENTO", "is_cliente": True},
+        )
+        missing_role = self._post_json(
+            reverse("invoices:manage_collection", args=["pessoas"]),
+            {"razao_social": "PESSOA SEM PAPEL", "cpf": "529.982.247-25"},
+        )
+
+        self.assertEqual(missing_document.status_code, 400)
+        self.assertEqual(missing_role.status_code, 400)
+        self.assertIn("CPF ou CNPJ", missing_document.json()["error"])
+        self.assertIn("papel", missing_role.json()["error"])
+
+    def test_people_reject_invalid_document_and_multiple_roles(self) -> None:
+        invalid_cpf = self._post_json(
+            reverse("invoices:manage_collection", args=["pessoas"]),
+            {"razao_social": "CPF INVALIDO", "cpf": "111.111.111-11", "is_cliente": True},
+        )
+        multiple_roles = self._post_json(
+            reverse("invoices:manage_collection", args=["pessoas"]),
+            {"razao_social": "PAPEIS DUPLOS", "cpf": "529.982.247-25", "is_cliente": True, "is_faturado": True},
+        )
+
+        self.assertEqual(invalid_cpf.status_code, 400)
+        self.assertEqual(multiple_roles.status_code, 400)
+        self.assertIn("CPF invalido", invalid_cpf.json()["error"])
+        self.assertIn("exatamente um papel", multiple_roles.json()["error"])
+
+    def test_people_accept_alphanumeric_cnpj_and_mask_documents(self) -> None:
+        response = self._post_json(
+            reverse("invoices:manage_collection", args=["pessoas"]),
+            {
+                "razao_social": "CNPJ ALFA",
+                "cnpj": "61.UV0.OYL/0001-96",
+                "inscricao_estadual": "123456789012",
+                "telefone": "(83) 99999-0000",
+                "cep": "58000-000",
+                "is_fornecedor": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        record = response.json()["record"]
+        self.assertEqual(record["cnpj"], "61.UV0.OYL/0001-96")
+        self.assertEqual(record["inscricao_estadual"], "123.456.789.012")
+        self.assertEqual(record["telefone"], "(83) 99999-0000")
+        self.assertEqual(record["cep"], "58000-000")
+
+    def test_classification_update_keeps_status_hidden_and_active(self) -> None:
+        response = self._post_json(
+            reverse("invoices:manage_detail", args=["classificacoes", self.classification.id]),
+            {"tipo": "DESPESA", "descricao": "MANUTENCAO E OPERACAO", "ativo": False},
+        )
+
+        self.classification.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.classification.ativo)
+        self.assertEqual(self.classification.descricao, "MANUTENCAO E OPERACAO")
+
+    def test_accounts_create_list_sort_and_logical_delete(self) -> None:
+        response = self._post_json(
+            reverse("invoices:manage_collection", args=["contas"]),
+            {
+                "tipo": "APAGAR",
+                "pessoa_id": self.supplier.id,
+                "faturado_id": self.billed.id,
+                "numero_documento": "CRUD-001",
+                "data_emissao": "2026-06-17",
+                "valor_total": "1234.56",
+                "classificacao_ids": [self.classification.id],
+                "observacoes": "Conta criada pela etapa 4",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        movement = MovimentoContas.objects.get(nome_documento__contains="FORNECEDOR API - NF MANUAL")
+        self.assertTrue(movement.ativo)
+        self.assertIn("FORNECEDOR API - NF", movement.nome_documento)
+        self.assertEqual(movement.classificacoes.get(), self.classification)
+
+        list_response = self.client.get(
+            reverse("invoices:manage_collection", args=["contas"]),
+            {"all": "1", "order": "-valor_total"},
+        )
+        self.assertEqual(list_response.status_code, 200)
+        self.assertIn("FORNECEDOR API - NF", list_response.json()["results"][0]["nome_documento"])
+
+        delete_response = self.client.delete(reverse("invoices:manage_detail", args=["contas", movement.id]))
+        movement.refresh_from_db()
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertFalse(movement.ativo)
+
+    def test_accounts_accept_brazilian_currency_mask_and_max_value(self) -> None:
+        response = self._post_json(
+            reverse("invoices:manage_collection", args=["contas"]),
+            {
+                "tipo": "APAGAR",
+                "pessoa_id": self.supplier.id,
+                "faturado_id": self.billed.id,
+                "numero_documento": "CRUD-MAX",
+                "data_emissao": date.today().isoformat(),
+                "valor_total": "R$ 999.999.999.999,00",
+                "classificacao_ids": [self.classification.id],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        movement = MovimentoContas.objects.get(nome_documento__contains="FORNECEDOR API - NF MANUAL")
+        self.assertEqual(movement.valor_total, Decimal("999999999999.00"))
+
+    def test_accounts_reject_incomplete_invalid_dates_and_excessive_values(self) -> None:
+        base_payload = {
+            "tipo": "APAGAR",
+            "pessoa_id": self.supplier.id,
+            "faturado_id": self.billed.id,
+            "numero_documento": "CRUD-INVALID",
+            "data_emissao": date.today().isoformat(),
+            "valor_total": "100.00",
+            "classificacao_ids": [self.classification.id],
+        }
+
+        missing_person = self._post_json(
+            reverse("invoices:manage_collection", args=["contas"]),
+            {**base_payload, "pessoa_id": ""},
+        )
+        old_date = self._post_json(
+            reverse("invoices:manage_collection", args=["contas"]),
+            {**base_payload, "data_emissao": "1909-12-31"},
+        )
+        future_date = self._post_json(
+            reverse("invoices:manage_collection", args=["contas"]),
+            {**base_payload, "data_emissao": "2099-01-01"},
+        )
+        excessive_value = self._post_json(
+            reverse("invoices:manage_collection", args=["contas"]),
+            {**base_payload, "valor_total": "R$ 1.000.000.000.000,00"},
+        )
+        missing_classification = self._post_json(
+            reverse("invoices:manage_collection", args=["contas"]),
+            {**base_payload, "classificacao_ids": []},
+        )
+
+        self.assertEqual(missing_person.status_code, 400)
+        self.assertEqual(old_date.status_code, 400)
+        self.assertEqual(future_date.status_code, 400)
+        self.assertEqual(excessive_value.status_code, 400)
+        self.assertEqual(missing_classification.status_code, 400)
+        self.assertIn("1910", old_date.json()["error"])
+        self.assertIn("futura", future_date.json()["error"])
+        self.assertIn("999.999.999.999,00", excessive_value.json()["error"])
+        self.assertIn("classificacao", missing_classification.json()["error"])
 
 
 class ValidationAgentTests(TestCase):

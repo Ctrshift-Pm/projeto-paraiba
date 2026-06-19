@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cadastros Administrativo-Financeiros</title>
+    <link id="app-css" rel="stylesheet" href="">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="/index.html">DocExtract</a>
+        <nav class="topbar-nav" aria-label="Navegação principal">
+          <a href="/cadastros.html" aria-current="page">Cadastros</a>
+          <a href="/rag.html">Consulta RAG</a>
+          <a href="/index.html">Extração</a>
+          <a class="topbar-action" href="/gemini.html?next=/cadastros.html">Trocar chave</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="page-shell manage-shell">
+      <section class="manage-hero" aria-labelledby="manage-title">
+        <div class="manage-heading">
+          <span class="manage-eyebrow">Interface administrativo-financeira</span>
+          <h1 id="manage-title">Cadastros</h1>
+          <p>Mantenha contas, pessoas e classificações com busca, ordenação e exclusão lógica.</p>
+        </div>
+        <button id="manage-new-button" class="action-button" type="button">Novo registro</button>
+      </section>
+
+      <section class="manage-stats" aria-label="Resumo de registros ativos">
+        <div class="manage-stat"><span>Contas ativas</span><strong id="count-contas">0</strong></div>
+        <div class="manage-stat"><span>Pessoas ativas</span><strong id="count-pessoas">0</strong></div>
+        <div class="manage-stat"><span>Classificações ativas</span><strong id="count-classificacoes">0</strong></div>
+      </section>
+
+      <section class="manage-controls" aria-label="Controles de cadastro">
+        <div class="manage-tabs" aria-label="Tipo de cadastro">
+          <button class="manage-tab active" type="button" data-resource="contas">Contas</button>
+          <button class="manage-tab" type="button" data-resource="pessoas">Pessoas</button>
+          <button class="manage-tab" type="button" data-resource="classificacoes">Classificações</button>
+        </div>
+
+        <div class="manage-toolbar" aria-label="Busca de registros">
+          <input id="manage-search" type="search" placeholder="Buscar registros ativos">
+          <button id="manage-search-button" class="action-button" type="button">Buscar</button>
+        </div>
+      </section>
+
+      <section class="manage-grid-section" aria-live="polite">
+        <div class="manage-result-bar">
+          <div>
+            <strong id="manage-resource-title">Contas</strong>
+            <span id="manage-result-count">Aguardando busca</span>
+          </div>
+          <span class="manage-result-hint">Clique nos cabeçalhos para ordenar</span>
+        </div>
+        <div class="table-wrap">
+          <table class="manage-table">
+            <thead id="manage-table-head"></thead>
+            <tbody id="manage-table-body"><tr><td class="empty-table" colspan="8">Use Buscar para carregar registros ativos.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <dialog id="manage-dialog" class="manage-dialog">
+        <form id="manage-form" method="dialog">
+          <input type="hidden" name="csrfmiddlewaretoken" value="">
+          <div class="dialog-heading">
+            <h2 id="manage-dialog-title">Novo registro</h2>
+            <button class="icon-button" type="button" data-close-dialog aria-label="Fechar">×</button>
+          </div>
+          <div id="manage-form-fields" class="manage-form-fields"></div>
+          <div class="dialog-actions">
+            <button class="action-button secondary" type="button" data-close-dialog>Cancelar</button>
+            <button id="manage-save-button" class="action-button" type="submit" disabled>Salvar</button>
+          </div>
+        </form>
+      </dialog>
+
+      <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    </main>
+
+    <script type="module" src="/src/manage.js"></script>
+  </body>
+</html>

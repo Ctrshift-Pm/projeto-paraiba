@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any
 
 from django.conf import settings
 from pypdf import PdfReader
+
+from . import gemini_usage
+from ..gemini_session import GeminiAccessError, is_gemini_auth_error
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -15,9 +21,13 @@ class ExtractionResult:
     data: dict
     provider: str
     fallback_reason: str | None = None
+    usage: dict = field(default_factory=dict)
 
 
 class PdfExtractionAgent:
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = str(api_key or getattr(settings, "GEMINI_API_KEY", "") or "").strip()
+
     def extract(self, uploaded_file) -> ExtractionResult:
         pdf_text = self._perceive(uploaded_file)
         return self._process_and_interpret(pdf_text)
@@ -26,14 +36,20 @@ class PdfExtractionAgent:
         return self._read_pdf_text(uploaded_file)
 
     def _process_and_interpret(self, pdf_text: str) -> ExtractionResult:
-        gemini_api_key = str(getattr(settings, "GEMINI_API_KEY", "") or "").strip()
+        gemini_api_key = self.api_key
         if gemini_api_key:
             try:
+                gemini_result = self._extract_with_gemini(pdf_text)
+                data, usage = self._gemini_result_payload(gemini_result)
                 return ExtractionResult(
-                    data=self._extract_with_gemini(pdf_text),
+                    data=data,
                     provider="gemini",
+                    usage=usage,
                 )
             except Exception as exc:
+                if is_gemini_auth_error(exc):
+                    raise GeminiAccessError("A chave do Gemini está inválida ou expirada.") from exc
+                self._log_gemini_failure(exc)
                 return ExtractionResult(
                     data=self._mock_data(pdf_text),
                     provider="mock",
@@ -65,13 +81,131 @@ class PdfExtractionAgent:
     def _extract_with_gemini(self, pdf_text: str) -> dict:
         from google import genai
 
-        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        client = genai.Client(api_key=self.api_key)
         prompt = self._prompt(pdf_text)
         response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
+            model=settings.GEMINI_EXTRACTION_MODEL,
+            config=self._gemini_config(),
             contents=prompt,
         )
-        return self._parse_json(response.text or "")
+        data, usage = self._gemini_response_payload(response)
+        if not usage:
+            usage = gemini_usage.estimated_usage_payload(prompt, data)
+        return data, usage
+
+    def _gemini_response_payload(self, response) -> tuple[dict, dict]:
+        usage = gemini_usage.usage_payload(gemini_usage.response_usage_metadata(response))
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, dict):
+            return parsed, usage
+        if hasattr(parsed, "model_dump"):
+            dumped = parsed.model_dump()
+            if isinstance(dumped, dict):
+                return dumped, usage
+
+        text = (getattr(response, "text", "") or "").strip()
+        if not text:
+            text = self._candidate_text(response).strip()
+        if not text.strip():
+            logger.warning("Gemini retornou resposta vazia na extracao. %s", self._response_debug_summary(response))
+        return self._parse_json(text), usage
+
+    def _response_usage_metadata(self, response) -> object:
+        return gemini_usage.response_usage_metadata(response)
+
+    def _candidate_text(self, response) -> str:
+        chunks = []
+        for candidate in getattr(response, "candidates", None) or []:
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", None) or []:
+                text = getattr(part, "text", "")
+                if text:
+                    chunks.append(text)
+        return "\n".join(chunks)
+
+    def _response_debug_summary(self, response) -> str:
+        parts = []
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        if prompt_feedback is not None:
+            parts.append(f"prompt_feedback={prompt_feedback}")
+        for index, candidate in enumerate(getattr(response, "candidates", None) or [], start=1):
+            finish_reason = getattr(candidate, "finish_reason", "")
+            parts.append(f"candidate_{index}_finish_reason={finish_reason}")
+            content = getattr(candidate, "content", None)
+            if content is not None:
+                parts.append(f"candidate_{index}_content={content}")
+        return " | ".join(parts) or "sem detalhes da resposta"
+
+    def _gemini_config(self) -> dict:
+        return {
+            "max_output_tokens": getattr(settings, "GEMINI_EXTRACTION_MAX_OUTPUT_TOKENS", 8192),
+            "response_mime_type": "application/json",
+            "response_json_schema": self._response_json_schema(),
+            "temperature": 0,
+        }
+
+    def _response_json_schema(self) -> dict:
+        string_fields = {
+            "type": "object",
+            "additionalProperties": True,
+        }
+        return {
+            "type": "object",
+            "additionalProperties": True,
+            "required": [
+                "fornecedor",
+                "faturado",
+                "numero_nota_fiscal",
+                "data_emissao",
+                "produtos",
+                "parcelas",
+                "valor_total",
+                "classificacoes_despesa",
+            ],
+            "properties": {
+                "fornecedor": string_fields,
+                "faturado": string_fields,
+                "numero_nota_fiscal": {"type": "string"},
+                "serie": {"type": "string"},
+                "chave_acesso": {"type": "string"},
+                "natureza_operacao": {"type": "string"},
+                "protocolo_autorizacao": {"type": "string"},
+                "data_emissao": {"type": "string"},
+                "data_saida_entrada": {"type": "string"},
+                "hora_saida": {"type": "string"},
+                "produtos": {
+                    "type": "array",
+                    "items": {"type": "object", "additionalProperties": True},
+                },
+                "parcelas": {
+                    "type": "array",
+                    "items": {"type": "object", "additionalProperties": True},
+                },
+                "valor_total": {"type": "number"},
+                "classificacoes_despesa": {
+                    "type": "array",
+                    "items": {"type": "object", "additionalProperties": True},
+                },
+            },
+        }
+
+    def _gemini_result_payload(self, gemini_result) -> tuple[dict, dict]:
+        if isinstance(gemini_result, tuple) and len(gemini_result) == 2:
+            data, usage = gemini_result
+            return data, usage if isinstance(usage, dict) else {}
+        return gemini_result, {}
+
+    def _usage_payload(self, usage_metadata: object) -> dict:
+        return gemini_usage.usage_payload(usage_metadata)
+
+    def _estimated_usage_payload(self, prompt: str, data: dict) -> dict:
+        return gemini_usage.estimated_usage_payload(prompt, data)
+
+    def _estimate_tokens(self, text: str) -> int:
+        return gemini_usage.estimate_tokens(text)
+
+    def _metadata_value(self, value: object, *names: str) -> int:
+        return gemini_usage.metadata_value(value, *names)
 
     def _prompt(self, pdf_text: str) -> str:
         contract = """
@@ -173,18 +307,108 @@ VALIDACAO FINAL ANTES DE RESPONDER:
 
         start = text.find("{")
         end = text.rfind("}")
-        if start == -1 or end == -1:
+        if start == -1:
+            preview = re.sub(r"\s+", " ", text[:260]).strip() if text else ""
+            logger.warning("Gemini nao retornou JSON na extracao. preview=%s", preview or "resposta vazia")
             raise ValueError("Gemini nao retornou JSON.")
 
+        candidate = text[start : end + 1 if end != -1 else len(text)].strip()
         try:
-            parsed: dict[str, Any] = json.loads(text[start : end + 1])
+            parsed: dict[str, Any] = json.loads(candidate)
         except json.JSONDecodeError as exc:
-            raise ValueError("Gemini retornou um texto que nao e JSON valido.") from exc
+            parsed = self._parse_json_repair(candidate, exc)
 
         if not isinstance(parsed, dict):
             raise ValueError("Gemini nao retornou objeto JSON.")
 
         return parsed
+
+    def _parse_json_repair(self, candidate: str, original_error: json.JSONDecodeError) -> dict:
+        decoder = json.JSONDecoder()
+        try:
+            parsed, _ = decoder.raw_decode(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        repaired = self._repair_common_json_issues(candidate)
+        if repaired != candidate:
+            try:
+                parsed = json.loads(repaired)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+        balanced = self._balance_json_suffix(repaired)
+        if balanced != repaired:
+            try:
+                parsed = json.loads(self._repair_common_json_issues(balanced))
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+        snippet = re.sub(r"\s+", " ", candidate[:220]).strip()
+        around_error = self._json_error_context(candidate, original_error.pos)
+        logger.warning(
+            "Gemini retornou JSON invalido na extracao. pos=%s msg=%s trecho=%s",
+            original_error.pos,
+            original_error.msg,
+            around_error,
+        )
+        raise ValueError(
+            f"Gemini retornou um texto que nao e JSON valido. "
+            f"Erro na posicao {original_error.pos}: {original_error.msg}. Trecho inicial: {snippet}"
+        ) from original_error
+
+    def _json_error_context(self, candidate: str, position: int, radius: int = 180) -> str:
+        start = max(0, position - radius)
+        end = min(len(candidate), position + radius)
+        return re.sub(r"\s+", " ", candidate[start:end]).strip()
+
+    def _repair_common_json_issues(self, candidate: str) -> str:
+        repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+        repaired = re.sub(r"([}\]])\s+(?=[{\[])", r"\1, ", repaired)
+        repaired = re.sub(r"([}\]])\s+(?=\"[A-Za-z_][A-Za-z0-9_]*\"\s*:)", r"\1, ", repaired)
+        repaired = re.sub(r"(\d|true|false|null|\"[^\"]*\")\s+(?=\"[A-Za-z_][A-Za-z0-9_]*\"\s*:)", r"\1, ", repaired)
+        repaired = re.sub(r"\bNone\b", "null", repaired)
+        repaired = re.sub(r"\bTrue\b", "true", repaired)
+        repaired = re.sub(r"\bFalse\b", "false", repaired)
+        return repaired
+
+    def _balance_json_suffix(self, candidate: str) -> str:
+        stack: list[str] = []
+        in_string = False
+        escaped = False
+        for char in candidate:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char in "{[":
+                stack.append(char)
+            elif char == "}" and stack and stack[-1] == "{":
+                stack.pop()
+            elif char == "]" and stack and stack[-1] == "[":
+                stack.pop()
+
+        if in_string:
+            candidate += '"'
+
+        closers = {"{": "}", "[": "]"}
+        return candidate + "".join(closers[item] for item in reversed(stack))
+
+    def _log_gemini_failure(self, exc: Exception) -> None:
+        logger.warning("Falha ao usar Gemini na extracao: %s: %s", exc.__class__.__name__, self._safe_fallback_reason(exc))
 
     def _safe_fallback_reason(self, exc: Exception) -> str:
         message = str(exc).strip() or exc.__class__.__name__

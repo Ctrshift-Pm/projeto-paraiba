@@ -1,0 +1,7 @@
+{
+  "rewrites": [
+    { "source": "/cadastros", "destination": "/cadastros.html" },
+    { "source": "/rag", "destination": "/rag.html" },
+    { "source": "/gemini", "destination": "/gemini.html" }
+  ]
+}

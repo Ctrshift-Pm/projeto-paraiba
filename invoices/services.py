@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from django.db.models import Q
 
 from .agents import ExpenseClassificationAgent, PdfExtractionAgent, PersistenceAgent, ValidationAgent
 from .models import Classificacao, InvoiceExtraction, MovimentoContas, ParcelaContas, Pessoa
+from .utils import display_document_name, due_status, only_alnum, only_digits
 
 
 @dataclass
@@ -30,9 +32,42 @@ class ClassificacaoLookupResult:
 
 class InvoiceExtractionService:
     _MAYBE = "MAYBE"
+    _PAGAR_CONTEXT_TOKENS = (
+        "compra",
+        "comp",
+        "fornecedor",
+        "insumo",
+        "despesa",
+        "manutencao",
+        "administrativo",
+    )
+    _RECEBER_CONTEXT_TOKENS = (
+        "venda",
+        "receita",
+        "cliente",
+        "faturamento",
+        "prestacao",
+        "servico",
+    )
+    _PAGAR_CLASSIFICATION_TOKENS = (
+        "despesa",
+        "custo",
+        "fornecedor",
+        "insumo",
+        "manutencao",
+        "salario",
+        "frete",
+    )
+    _RECEBER_CLASSIFICATION_TOKENS = (
+        "receita",
+        "faturamento",
+        "prestacao",
+        "servico",
+        "honorario",
+    )
 
-    def __init__(self) -> None:
-        self.pdf_agent = PdfExtractionAgent()
+    def __init__(self, gemini_api_key: str | None = None) -> None:
+        self.pdf_agent = PdfExtractionAgent(api_key=gemini_api_key)
         self.classification_agent = ExpenseClassificationAgent()
         self.validation_agent = ValidationAgent()
         self.persistence_agent = PersistenceAgent()
@@ -69,9 +104,30 @@ class InvoiceExtractionService:
                 "created_at": record.created_at.isoformat(),
             },
         }
+        usage = self._usage_for_extraction(extraction, data)
+        if usage:
+            payload["metadata"]["usage"] = usage
         if extraction.fallback_reason:
             payload["fallback_reason"] = extraction.fallback_reason
         return payload
+
+    def _usage_for_extraction(self, extraction, data: dict) -> dict:
+        if extraction.usage:
+            return extraction.usage
+        if extraction.provider == "gemini":
+            return self._estimated_usage_from_payload(data)
+        return {}
+
+    def _estimated_usage_from_payload(self, data: dict) -> dict:
+        output = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        output_tokens = max(1, int(len(output) / 4))
+        return {
+            "input_tokens": 0,
+            "output_tokens": output_tokens,
+            "total_tokens": output_tokens,
+            "estimated": True,
+            "note": "Estimativa parcial: o SDK nao retornou metadata de tokens para esta chamada.",
+        }
 
     def analyze(self, extraction_id: int) -> dict:
         extraction = self._get_extraction(extraction_id)
@@ -82,57 +138,21 @@ class InvoiceExtractionService:
 
         movement_blocks = self._infer_movement_blocks(data)
 
-        flattened_classificacoes = []
-        for block in movement_blocks:
-            for item in block["raw_classifications"]:
-                class_lookup = self._lookup_classification(
-                    item["categoria"],
-                    self._classification_type_from_movement_type(block["movement_type"]),
-                )
-                if class_lookup.classificacao is None:
-                    flattened_classificacoes.append(
-                        {
-                            "descricao": item["categoria"],
-                            "exists": False,
-                            "id": None,
-                            "reactivated": False,
-                        }
-                    )
-                else:
-                    flattened_classificacoes.append(self._classification_analysis_payload(class_lookup))
-
-        seen = set()
-        unique_classifications = []
-        for item in flattened_classificacoes:
-            key = (item["descricao"], item["id"])
-            if key in seen:
-                continue
-            seen.add(key)
-            unique_classifications.append(item)
-
         analyzed_blocks = []
         for block in movement_blocks:
             block_type = block["movement_type"]
-            block_classifications = []
-            for item in block["raw_classifications"]:
-                block_lookup = self._lookup_classification(
-                    item["categoria"],
-                    self._classification_type_from_movement_type(block_type),
-                )
-                if block_lookup.classificacao is None:
-                    block_classifications.append(
-                        {
-                            "descricao": item["categoria"],
-                            "exists": False,
-                            "id": None,
-                            "reactivated": False,
-                        }
-                    )
-                else:
-                    block_classifications.append(self._classification_analysis_payload(block_lookup))
+            block_classifications = [
+                self._classification_analysis_from_raw(item, block_type)
+                for item in block["raw_classifications"]
+            ]
             analyzed_blocks.append({"movement_type": block_type, "classificacoes": block_classifications})
 
         movement_type = analyzed_blocks[0]["movement_type"] if len(analyzed_blocks) == 1 else "MISTO"
+        unique_classifications = self._unique_classification_payloads(
+            item
+            for block in analyzed_blocks
+            for item in block["classificacoes"]
+        )
 
         return {
             "success": True,
@@ -241,6 +261,31 @@ class InvoiceExtractionService:
         except InvoiceExtraction.DoesNotExist as exc:
             raise ValueError("Registro de extracao nao encontrado.") from exc
 
+    def _classification_analysis_from_raw(self, item: dict, movement_type: str) -> dict:
+        class_lookup = self._lookup_classification(
+            item["categoria"],
+            self._classification_type_from_movement_type(movement_type),
+        )
+        if class_lookup.classificacao is None:
+            return {
+                "descricao": item["categoria"],
+                "exists": False,
+                "id": None,
+                "reactivated": False,
+            }
+        return self._classification_analysis_payload(class_lookup)
+
+    def _unique_classification_payloads(self, classifications) -> list[dict]:
+        seen = set()
+        unique = []
+        for item in classifications:
+            key = (item["descricao"], item["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
     def _extract_classification_payload(self, classifications: list[dict]) -> list[dict]:
         return [self._normalize_classification(item) for item in classifications if isinstance(item, dict)]
 
@@ -345,33 +390,8 @@ class InvoiceExtractionService:
             ]
         ).lower()
 
-        pagar_score = 0
-        receber_score = 0
-
-        pagar_tokens = (
-            "compra",
-            "comp",
-            "fornecedor",
-            "insumo",
-            "despesa",
-            "manutencao",
-            "administrativo",
-        )
-        receber_tokens = (
-            "venda",
-            "receita",
-            "cliente",
-            "faturamento",
-            "prestacao",
-            "servico",
-        )
-
-        for token in pagar_tokens:
-            if token in context:
-                pagar_score += 1
-        for token in receber_tokens:
-            if token in context:
-                receber_score += 1
+        pagar_score = self._token_score(context, self._PAGAR_CONTEXT_TOKENS)
+        receber_score = self._token_score(context, self._RECEBER_CONTEXT_TOKENS)
 
         if pagar_score and receber_score:
             return "MISTO"
@@ -388,32 +408,8 @@ class InvoiceExtractionService:
             ]
         ).lower()
 
-        pagar_tokens = (
-            "despesa",
-            "custo",
-            "fornecedor",
-            "insumo",
-            "manutencao",
-            "salario",
-            "frete",
-        )
-        receber_tokens = (
-            "receita",
-            "faturamento",
-            "prestacao",
-            "servico",
-            "honorario",
-        )
-
-        pagar_score = 0
-        receber_score = 0
-
-        for token in pagar_tokens:
-            if token in text:
-                pagar_score += 1
-        for token in receber_tokens:
-            if token in text:
-                receber_score += 1
+        pagar_score = self._token_score(text, self._PAGAR_CLASSIFICATION_TOKENS)
+        receber_score = self._token_score(text, self._RECEBER_CLASSIFICATION_TOKENS)
 
         if pagar_score > receber_score:
             return MovimentoContas.Tipo.APAGAR
@@ -421,23 +417,28 @@ class InvoiceExtractionService:
             return MovimentoContas.Tipo.ARECEBER
         return self._MAYBE
 
-    def _lookup_person(self, raw_data: dict, role: str) -> PessoaLookupResult:
-        lookup_candidates = self._person_lookup_candidates(raw_data)
-        pessoa = None
-        if lookup_candidates["document_field"] and lookup_candidates["document_value"]:
-            filters = Q(**{lookup_candidates["document_field"]: lookup_candidates["document_value"]})
-            if raw_document := lookup_candidates.get("document_value_raw"):
-                filters |= Q(**{lookup_candidates["document_field"]: raw_document})
-            pessoa = Pessoa.objects.filter(filters).first()
-        if pessoa is None and lookup_candidates["name"]:
-            pessoa = Pessoa.objects.filter(razao_social__iexact=lookup_candidates["name"]).first()
+    def _token_score(self, text: str, tokens: tuple[str, ...]) -> int:
+        return sum(1 for token in tokens if token in text)
 
+    def _lookup_person(self, raw_data: dict, role: str) -> PessoaLookupResult:
+        pessoa = self._find_person(raw_data)
         if pessoa is None:
             return PessoaLookupResult(pessoa=None, existed=False, reactivated=False)
 
         return PessoaLookupResult(pessoa=pessoa, existed=True, reactivated=not pessoa.ativo)
 
     def _get_or_create_person(self, raw_data: dict, role: str) -> PessoaLookupResult:
+        pessoa = self._find_person(raw_data)
+        existed = pessoa is not None
+
+        if pessoa is None:
+            pessoa = Pessoa.objects.create(**self._person_defaults(raw_data, role))
+            return PessoaLookupResult(pessoa=pessoa, existed=False, reactivated=False)
+
+        reactivated = self._update_person_from_raw(pessoa, raw_data, role)
+        return PessoaLookupResult(pessoa=pessoa, existed=existed, reactivated=reactivated)
+
+    def _find_person(self, raw_data: dict) -> Pessoa | None:
         lookup_candidates = self._person_lookup_candidates(raw_data)
         pessoa = None
         if lookup_candidates["document_field"] and lookup_candidates["document_value"]:
@@ -447,19 +448,15 @@ class InvoiceExtractionService:
             pessoa = Pessoa.objects.filter(filters).first()
         if pessoa is None and lookup_candidates["name"]:
             pessoa = Pessoa.objects.filter(razao_social__iexact=lookup_candidates["name"]).first()
+        return pessoa
 
-        existed = pessoa is not None
-
-        if pessoa is None:
-            pessoa = Pessoa.objects.create(**self._person_defaults(raw_data, role))
-            return PessoaLookupResult(pessoa=pessoa, existed=False, reactivated=False)
-
+    def _update_person_from_raw(self, pessoa: Pessoa, raw_data: dict, role: str) -> bool:
         updates = self._person_defaults(raw_data, role)
         activate = bool(updates.pop("ativo", False))
         for field, value in updates.items():
             current = getattr(pessoa, field)
             if isinstance(current, bool):
-                setattr(pessoa, field, current or bool(value))
+                setattr(pessoa, field, bool(value))
             elif value and not current:
                 setattr(pessoa, field, value)
 
@@ -471,7 +468,7 @@ class InvoiceExtractionService:
         else:
             pessoa.save()
 
-        return PessoaLookupResult(pessoa=pessoa, existed=existed, reactivated=reactivated)
+        return reactivated
 
     def _lookup_classification(self, description: str, classification_type: str) -> ClassificacaoLookupResult:
         normalized = self._safe_str(description)
@@ -535,7 +532,7 @@ class InvoiceExtractionService:
         return results
 
     def _person_lookup_candidates(self, raw_data: dict) -> dict[str, str]:
-        cnpj = self._only_digits(raw_data.get("cnpj"))
+        cnpj = self._only_alnum(raw_data.get("cnpj"))
         cpf = self._only_digits(raw_data.get("cpf"))
         if cnpj:
             return {
@@ -564,14 +561,14 @@ class InvoiceExtractionService:
             "razao_social": name,
             "nome_fantasia": self._safe_str(raw_data.get("fantasia")),
             "cpf": self._only_digits(raw_data.get("cpf")),
-            "cnpj": self._only_digits(raw_data.get("cnpj")),
-            "inscricao_estadual": self._safe_str(raw_data.get("inscricao_estadual")),
+            "cnpj": self._only_alnum(raw_data.get("cnpj")),
+            "inscricao_estadual": only_digits(raw_data.get("inscricao_estadual")),
             "endereco": self._safe_str(raw_data.get("endereco")),
-            "numero": self._safe_str(raw_data.get("numero")),
+            "numero": only_digits(raw_data.get("numero")),
             "bairro": self._safe_str(raw_data.get("bairro")),
             "municipio": self._safe_str(raw_data.get("municipio")),
             "uf": self._safe_str(raw_data.get("uf"))[:2],
-            "cep": self._safe_str(raw_data.get("cep")),
+            "cep": only_digits(raw_data.get("cep")),
             "telefone": self._safe_str(raw_data.get("telefone")),
             "is_cliente": role == "cliente",
             "is_fornecedor": role == "fornecedor",
@@ -641,12 +638,18 @@ class InvoiceExtractionService:
             raw_number=data.get("numero_nota_fiscal"),
         )
 
+        issue_date = self._parse_date(data.get("data_emissao"), field_name="data_emissao")
         movement = MovimentoContas.objects.create(
             tipo=movement_type,
             pessoa=pessoa,
             faturado=faturado,
             numero_documento=numero_documento,
-            data_emissao=self._parse_date(data.get("data_emissao"), field_name="data_emissao"),
+            nome_documento=display_document_name(
+                supplier_name=pessoa.razao_social,
+                number=numero_documento,
+                issue_date=issue_date,
+            ),
+            data_emissao=issue_date,
             valor_total=self._decimal(data.get("valor_total")),
             observacoes=self._safe_str(data.get("informacoes_complementares")),
             dados_extraidos=data,
@@ -706,6 +709,8 @@ class InvoiceExtractionService:
                 valor=self._decimal(item.get("valor")),
                 ativo=True,
             )
+            parcela.status_vencimento = due_status(parcela.data_vencimento)
+            parcela.save(update_fields=["status_vencimento", "updated_at"])
             created.append(parcela)
         return created
 
@@ -732,6 +737,10 @@ class InvoiceExtractionService:
 
     def _only_digits(self, value) -> str:
         value = re.sub(r"\D+", "", self._safe_str(value))
+        return value if value else None
+
+    def _only_alnum(self, value) -> str:
+        value = re.sub(r"[^0-9A-Za-z]+", "", self._safe_str(value)).upper()
         return value if value else None
 
     def _safe_str(self, value) -> str:

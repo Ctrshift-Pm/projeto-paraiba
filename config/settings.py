@@ -7,9 +7,30 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-key")
-DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
-ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,0.0.0.0").split(",")
+def env_bool(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+DEBUG = env_bool("DJANGO_DEBUG", "1")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "dev-secret-key"
+    else:
+        raise ValueError("DJANGO_SECRET_KEY nao definido. Configure uma chave segura em producao.")
+
+try:
+    import whitenoise  # noqa: F401
+
+    WHITENOISE_AVAILABLE = True
+except ImportError:
+    WHITENOISE_AVAILABLE = False
+
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,0.0.0.0").split(",")
+    if host.strip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -30,6 +51,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+if WHITENOISE_AVAILABLE:
+    MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
 
 ROOT_URLCONF = "config.urls"
 
@@ -85,9 +109,38 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATICFILES_DIRS = [BASE_DIR / "static"]
+STATIC_ROOT = BASE_DIR / "staticfiles"
+if WHITENOISE_AVAILABLE:
+    STORAGES = {
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+    }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "loggers": {
+        "invoices": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
+
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_LEGACY_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "")
+GEMINI_EXTRACTION_MODEL = os.getenv("GEMINI_EXTRACTION_MODEL", _LEGACY_GEMINI_MODEL or "gemini-2.5-flash")
+GEMINI_EXTRACTION_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_EXTRACTION_MAX_OUTPUT_TOKENS", "8192"))
+GEMINI_RAG_MODEL = os.getenv("GEMINI_RAG_MODEL", _LEGACY_GEMINI_MODEL or "gemini-2.5-flash-lite")
+GEMINI_RAG_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_RAG_MAX_OUTPUT_TOKENS", "900"))
+GEMINI_MODEL = GEMINI_EXTRACTION_MODEL

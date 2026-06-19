@@ -96,6 +96,7 @@ class MovimentoContas(SoftDeletableModel):
         related_name="movimentos_faturados",
     )
     numero_documento = models.CharField(max_length=64)
+    nome_documento = models.CharField(max_length=255, blank=True, default="")
     data_emissao = models.DateField()
     valor_total = models.DecimalField(max_digits=14, decimal_places=2)
     observacoes = models.TextField(blank=True, default="")
@@ -116,11 +117,17 @@ class MovimentoContas(SoftDeletableModel):
 
 
 class ParcelaContas(SoftDeletableModel):
+    class StatusVencimento(models.TextChoices):
+        ABERTA = "ABERTA", "Aberta"
+        A_VENCER = "A_VENCER", "A vencer"
+        VENCIDA = "VENCIDA", "Vencida"
+
     movimento = models.ForeignKey(MovimentoContas, on_delete=models.CASCADE, related_name="parcelas")
     identificacao = models.CharField(max_length=64, blank=True, default="")
     numero = models.PositiveIntegerField(default=1)
     data_vencimento = models.DateField()
     valor = models.DecimalField(max_digits=14, decimal_places=2)
+    status_vencimento = models.CharField(max_length=16, choices=StatusVencimento.choices, default=StatusVencimento.ABERTA)
 
     class Meta:
         ordering = ["movimento_id", "numero", "id"]

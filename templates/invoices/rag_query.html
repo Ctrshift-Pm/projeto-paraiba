@@ -1,0 +1,359 @@
+{% load static %}
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Consulta RAG do Banco de Dados</title>
+    <link rel="stylesheet" href="{% static 'invoices/styles.css' %}">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="/">DocExtract</a>
+        <nav class="topbar-nav" aria-label="Navegação principal">
+          <a href="{% url 'invoices:manage_records' %}">Cadastros</a>
+          <a href="/">Notas Fiscais</a>
+          <a href="{% url 'invoices:rag_query' %}" aria-current="page">Consulta RAG</a>
+          <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?next={% url 'invoices:rag_query' %}">Trocar chave</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="page-shell">
+      <section class="hero rag-hero" aria-labelledby="rag-title">
+        <h1 id="rag-title">Consulta RAG do Banco de Dados</h1>
+        <p>Pergunte sobre notas fiscais, movimentos, pessoas, parcelas e classificações já registradas.</p>
+      </section>
+
+      <section class="rag-panel" aria-labelledby="rag-form-title">
+        <h2 id="rag-form-title">Pergunta</h2>
+        <form class="rag-form" method="get" autocomplete="off" data-rag-form>
+          <label for="query">Digite sua pergunta</label>
+          <textarea id="query" name="query" rows="5" autocomplete="off" placeholder="Ex.: Qual foi o total de contas a pagar importado?">{{ query }}</textarea>
+
+          <fieldset class="rag-mode">
+            <legend>Tipo de recuperação</legend>
+            <label>
+              <input type="radio" name="mode" value="simple" {% if mode != "embeddings" %}checked{% endif %}>
+              <span>RAG simples</span>
+            </label>
+            <label>
+              <input type="radio" name="mode" value="embeddings" {% if mode == "embeddings" %}checked{% endif %}>
+              <span>RAG embeddings</span>
+            </label>
+          </fieldset>
+
+          <button class="extract-button rag-submit" type="submit">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M21 21l-4.3-4.3"></path>
+              <circle cx="11" cy="11" r="8"></circle>
+            </svg>
+            <span>Consultar</span>
+          </button>
+          <p class="rag-loading" data-rag-loading hidden>
+            <span class="rag-spinner" aria-hidden="true"></span>
+            Carregando RAG...
+          </p>
+        </form>
+      </section>
+
+      <section class="rag-examples" aria-labelledby="rag-examples-title">
+        <h2 id="rag-examples-title">Exemplos de perguntas</h2>
+        <div class="rag-example-grid">
+          <button type="button" data-question="Qual o total de contas a pagar?">Qual o total de contas a pagar?</button>
+          <button type="button" data-question="Qual o total de contas a receber?">Qual o total de contas a receber?</button>
+          <button type="button" data-question="Qual o saldo entre receber e pagar?">Qual o saldo entre receber e pagar?</button>
+          <button type="button" data-question="Quantos movimentos financeiros existem?">Quantos movimentos financeiros existem?</button>
+          <button type="button" data-question="Quais são as maiores notas lançadas?">Quais são as maiores notas lançadas?</button>
+          <button type="button" data-question="Quais parcelas estão cadastradas?">Quais parcelas estão cadastradas?</button>
+          <button type="button" data-question="Quais fornecedores aparecem no banco?">Quais fornecedores aparecem no banco?</button>
+          <button type="button" data-question="Quais classificações de despesa foram usadas?">Quais classificações de despesa foram usadas?</button>
+        </div>
+      </section>
+
+      {% if error %}
+        <section class="rag-alert" role="alert">
+          {{ error }}
+        </section>
+      {% endif %}
+
+      {% if result %}
+        <section class="rag-result" aria-labelledby="rag-result-title">
+          <div class="results-heading">
+            <h2 id="rag-result-title">Resposta do Agente</h2>
+            <p class="provider-badge">
+              Modo: {{ result.mode }} | Geração: {{ result.provider }}
+              {% if result.usage.total_tokens %}
+                | Tokens: {{ result.usage.total_tokens }} total ({{ result.usage.input_tokens }} entrada / {{ result.usage.output_tokens }} saída)
+              {% endif %}
+              {% if result.context_usage %}
+                | Intenção: {{ result.context_usage.intent }}
+                | Contexto: {{ result.context_usage.document_count }} fonte(s), ~{{ result.context_usage.estimated_input_tokens }} tokens, {{ result.context_usage.status }}
+              {% endif %}
+            </p>
+          </div>
+
+          <article class="rag-answer">
+            {{ result.answer|linebreaksbr }}
+          </article>
+
+          {% if result.answer_documents %}
+            <section class="rag-answer-data" aria-labelledby="rag-answer-data-title">
+              <h3 id="rag-answer-data-title">Resumo do que foi usado pelo agente</h3>
+              <div class="rag-doc-table-wrap">
+                <table class="rag-doc-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Documento</th>
+                      <th scope="col">Fonte</th>
+                      <th scope="col">Score</th>
+                      <th scope="col">Status do Score</th>
+                      <th scope="col">Dados</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for doc in result.answer_documents %}
+                      <tr class='{% if doc.score_status == "ALTO" %}trusted{% elif doc.score_status == "MÉDIO" %}medium{% else %}suspect{% endif %}' data-rag-summary-row>
+                        <td>
+                          {% if doc.score_status == "ALTO" %}
+                            <strong>&gt; {{ doc.title }}</strong>
+                          {% else %}
+                            <span class="rag-summary-suspect">[{{ doc.score_status }}] {{ doc.title }}</span>
+                          {% endif %}
+                        </td>
+                        <td>{{ doc.source }}</td>
+                        <td>{{ doc.score }} / {{ doc.score_label }}</td>
+                        <td>{{ doc.score_status }}</td>
+                        <td>
+                          {% if doc.rows %}
+                            <table class="rag-kv-table compact">
+                              <tbody>
+                                {% for row in doc.rows %}
+                                  <tr>
+                                    <th scope="row">{{ row.campo }}</th>
+                                    <td>{{ row.valor }}</td>
+                                  </tr>
+                                {% endfor %}
+                              </tbody>
+                            </table>
+                          {% else %}
+                            {{ doc.content }}
+                          {% endif %}
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              <button class="rag-show-more" type="button" data-rag-show-more="summary" hidden>Mostrar mais resumos</button>
+            </section>
+          {% endif %}
+
+          <section class="rag-sources rag-movements" aria-labelledby="rag-movements-title">
+            <h3 id="rag-movements-title">Documentos do banco</h3>
+            {% if movement_catalog %}
+              <p class="analysis-summary">Lista completa dos documentos cadastrados no banco, com acesso aos detalhes completos por linha.</p>
+              <div class="rag-doc-table-wrap">
+                <table class="rag-doc-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Documento</th>
+                      <th scope="col">Tipo</th>
+                      <th scope="col">Pessoa</th>
+                      <th scope="col">Faturado</th>
+                      <th scope="col">Data</th>
+                      <th scope="col">Valor</th>
+                      <th scope="col">Classificações</th>
+                      <th scope="col">Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for item in movement_catalog %}
+                      <tr class="movement-row" data-rag-movement-row>
+                        <td><strong>{{ item.title }}</strong></td>
+                        <td>{{ item.movement_label }}</td>
+                        <td>{{ item.pessoa }}</td>
+                        <td>{{ item.faturado }}</td>
+                        <td>{{ item.data_emissao }}</td>
+                        <td>{{ item.valor_total }}</td>
+                        <td>{{ item.classificacoes }}</td>
+                        <td>
+                          <button
+                            class="rag-detail-button"
+                            type="button"
+                            data-rag-detail-index="{{ forloop.counter0 }}"
+                          >
+                            Mais detalhes
+                          </button>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              {{ movement_catalog|json_script:"rag-movement-catalog" }}
+            {% else %}
+              <p class="empty-state">Nenhum documento ativo encontrado no banco.</p>
+            {% endif %}
+          </section>
+        </section>
+      {% endif %}
+    </main>
+
+    <div class="rag-modal" hidden data-rag-modal>
+      <div class="rag-modal-backdrop" data-rag-modal-close></div>
+      <section class="rag-modal-panel" role="dialog" aria-modal="true" aria-labelledby="rag-modal-title">
+        <div class="rag-modal-header">
+          <div>
+            <p class="rag-modal-eyebrow">Detalhes do movimento</p>
+            <h3 id="rag-modal-title">-</h3>
+          </div>
+          <button class="rag-modal-close" type="button" data-rag-modal-close aria-label="Fechar detalhes">
+            Fechar
+          </button>
+        </div>
+        <p class="rag-modal-meta" data-rag-modal-meta></p>
+        <table class="rag-kv-table compact">
+          <tbody data-rag-modal-rows></tbody>
+        </table>
+      </section>
+    </div>
+
+    <script>
+      document.querySelectorAll(".rag-example-grid button").forEach((item) => {
+        item.addEventListener("click", (event) => {
+          event.preventDefault();
+          const input = document.querySelector("#query");
+          input.value = item.dataset.question || item.textContent.trim();
+          input.focus();
+        });
+      });
+
+      const ragForm = document.querySelector("[data-rag-form]");
+      const ragSubmit = document.querySelector(".rag-submit");
+      const ragLoading = document.querySelector("[data-rag-loading]");
+      if (ragForm && ragSubmit && ragLoading) {
+        ragForm.addEventListener("submit", () => {
+          ragSubmit.disabled = true;
+          ragSubmit.setAttribute("aria-busy", "true");
+          ragLoading.hidden = false;
+        });
+      }
+
+      function setupShowMore(selector, buttonSelector, initialLimit, increment, label) {
+        const items = Array.from(document.querySelectorAll(selector));
+        const button = document.querySelector(buttonSelector);
+        if (!button || items.length <= initialLimit) {
+          return;
+        }
+
+        let visible = initialLimit;
+        const render = () => {
+          items.forEach((item, index) => {
+            item.hidden = index >= visible;
+          });
+          const remaining = items.length - visible;
+          button.hidden = remaining <= 0;
+          button.textContent = remaining > 0 ? `Mostrar mais ${label} (${remaining})` : "";
+        };
+
+        button.addEventListener("click", () => {
+          visible += increment;
+          render();
+        });
+        render();
+      }
+
+      setupShowMore("[data-rag-summary-row]", '[data-rag-show-more="summary"]', 7, 7, "resumos");
+
+      const catalogElement = document.getElementById("rag-movement-catalog");
+      const movementCatalog = catalogElement ? JSON.parse(catalogElement.textContent) : [];
+      const modal = document.querySelector("[data-rag-modal]");
+      const modalPanel = document.querySelector(".rag-modal-panel");
+      const modalTitle = document.querySelector("#rag-modal-title");
+      const modalMeta = document.querySelector("[data-rag-modal-meta]");
+      const modalRows = document.querySelector("[data-rag-modal-rows]");
+
+      function closeModal() {
+        if (!modal) {
+          return;
+        }
+        modal.hidden = true;
+      }
+
+      function openModal(item) {
+        if (!modal || !item) {
+          return;
+        }
+        modalTitle.textContent = item.title || "Detalhes";
+        modalMeta.textContent = `${item.source || ""} | ${item.movement_label || ""} | ${item.valor_total || ""}`;
+        modalRows.innerHTML = "";
+
+        (item.rows || []).forEach((row) => {
+          const tr = document.createElement("tr");
+          const th = document.createElement("th");
+          th.scope = "row";
+          th.textContent = row.campo || "-";
+          const td = document.createElement("td");
+          td.textContent = row.valor || "-";
+          tr.appendChild(th);
+          tr.appendChild(td);
+          modalRows.appendChild(tr);
+        });
+
+        modal.hidden = false;
+      }
+
+      document.querySelectorAll("[data-rag-detail-index]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const index = Number(button.dataset.ragDetailIndex);
+          openModal(movementCatalog[index]);
+        });
+      });
+
+      document.querySelectorAll("[data-rag-modal-close]").forEach((button) => {
+        button.addEventListener("click", closeModal);
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && modal && !modal.hidden) {
+          closeModal();
+        }
+      });
+
+      document.addEventListener(
+        "wheel",
+        (event) => {
+          if (!modal || modal.hidden || !modalPanel) {
+            return;
+          }
+
+          const panelRect = modalPanel.getBoundingClientRect();
+          const withinPanel =
+            event.clientX >= panelRect.left &&
+            event.clientX <= panelRect.right &&
+            event.clientY >= panelRect.top &&
+            event.clientY <= panelRect.bottom;
+
+          if (!withinPanel) {
+            return;
+          }
+
+          const canScrollUp = modalPanel.scrollTop > 0;
+          const canScrollDown = modalPanel.scrollTop + modalPanel.clientHeight < modalPanel.scrollHeight;
+          const scrollingDown = event.deltaY > 0;
+          const scrollingUp = event.deltaY < 0;
+
+          if ((scrollingDown && canScrollDown) || (scrollingUp && canScrollUp)) {
+            return;
+          }
+
+          window.scrollBy({ top: event.deltaY, left: 0, behavior: "auto" });
+          event.preventDefault();
+        },
+        { passive: false }
+      );
+    </script>
+  </body>
+</html>
