@@ -1,48 +1,6 @@
 from __future__ import annotations
 
 class ValidationAgent:
-    top_level_string_fields = {
-        "serie": ("serie", "série"),
-        "chave_acesso": ("chave_acesso", "chave_de_acesso", "chave"),
-        "natureza_operacao": ("natureza_operacao", "natureza_da_operacao", "natureza"),
-        "protocolo_autorizacao": ("protocolo_autorizacao", "protocolo", "protocolo_nfe"),
-        "data_saida_entrada": ("data_saida_entrada", "data_saida", "data_entrada"),
-        "hora_saida": ("hora_saida", "hora_entrada"),
-        "informacoes_complementares": (
-            "informacoes_complementares",
-            "informacoes_adicionais",
-            "dados_adicionais",
-            "observacoes",
-        ),
-    }
-    top_level_number_fields = {
-        "valor_produtos": ("valor_produtos", "valor_total_produtos", "total_produtos"),
-        "valor_frete": ("valor_frete", "frete"),
-        "valor_desconto": ("valor_desconto", "desconto"),
-        "valor_seguro": ("valor_seguro", "seguro"),
-        "outras_despesas": ("outras_despesas", "valor_outras_despesas", "despesas_acessorias"),
-        "base_calculo_icms": ("base_calculo_icms", "bc_icms"),
-        "valor_icms": ("valor_icms", "icms"),
-        "base_calculo_icms_st": ("base_calculo_icms_st", "bc_icms_st"),
-        "valor_icms_st": ("valor_icms_st", "icms_st"),
-        "valor_ipi": ("valor_ipi", "ipi"),
-        "valor_pis": ("valor_pis", "pis"),
-        "valor_cofins": ("valor_cofins", "cofins"),
-    }
-    party_fields = {
-        "razao_social": ("razao_social", "nome_razao_social", "nome", "razao"),
-        "fantasia": ("fantasia", "nome_fantasia"),
-        "cnpj": ("cnpj", "cpf_cnpj"),
-        "cpf": ("cpf",),
-        "inscricao_estadual": ("inscricao_estadual", "ie"),
-        "endereco": ("endereco", "logradouro"),
-        "numero": ("numero", "numero_endereco"),
-        "bairro": ("bairro",),
-        "municipio": ("municipio", "cidade"),
-        "uf": ("uf", "estado"),
-        "cep": ("cep",),
-        "telefone": ("telefone", "fone"),
-    }
     required_top_level = [
         "fornecedor",
         "faturado",
@@ -64,84 +22,29 @@ class ValidationAgent:
 
         normalized = {
             "fornecedor": self._normalize_nested(
-                data.get("fornecedor") or data.get("emitente"),
+                data.get("fornecedor"),
                 {
                     "razao_social": ("razao_social",),
                     "fantasia": ("fantasia", "nome_fantasia"),
                     "cnpj": ("cnpj",),
-                    "inscricao_estadual": ("inscricao_estadual", "ie"),
-                    "endereco": ("endereco", "logradouro"),
-                    "numero": ("numero", "numero_endereco"),
-                    "bairro": ("bairro",),
-                    "municipio": ("municipio", "cidade"),
-                    "uf": ("uf", "estado"),
-                    "cep": ("cep",),
-                    "telefone": ("telefone", "fone"),
                 },
             ),
             "faturado": self._normalize_nested(
-                data.get("faturado") or data.get("destinatario"),
+                data.get("faturado"),
                 {
                     "nome_completo": ("nome_completo", "nome", "razao_social"),
-                    "cpf": ("cpf",),
-                    "cnpj": ("cnpj",),
-                    "inscricao_estadual": ("inscricao_estadual", "ie"),
-                    "endereco": ("endereco", "logradouro"),
-                    "numero": ("numero", "numero_endereco"),
-                    "bairro": ("bairro",),
-                    "municipio": ("municipio", "cidade"),
-                    "uf": ("uf", "estado"),
-                    "cep": ("cep",),
-                    "telefone": ("telefone", "fone"),
+                    "cpf": ("cpf", "cnpj"),
                 },
             ),
             "numero_nota_fiscal": self._safe_str(data.get("numero_nota_fiscal") or data.get("numero")),
             "data_emissao": self._safe_str(data.get("data_emissao") or data.get("dataEmissao")),
             "produtos": self._normalize_products(data.get("produtos") or data.get("itens")),
             "parcelas": self._normalize_installments(data.get("parcelas")),
-            "valor_total": self._number(
-                data.get("valor_total") or data.get("valorTotal") or data.get("valor_total_nota") or data.get("valor_nota")
-            ),
+            "valor_total": self._number(data.get("valor_total") or data.get("valorTotal")),
             "classificacoes_despesa": self._normalize_classifications(
                 data.get("classificacoes_despesa") or data.get("tipoDespesa") or data.get("despesas")
             ),
-            "local_entrega": self._normalize_nested(
-                data.get("local_entrega") or data.get("entrega"),
-                {
-                    "nome_razao_social": ("nome_razao_social", "razao_social", "nome"),
-                    "cpf_cnpj": ("cpf_cnpj", "cnpj", "cpf"),
-                    "inscricao_estadual": ("inscricao_estadual", "ie"),
-                    "endereco": ("endereco", "logradouro"),
-                    "numero": ("numero", "numero_endereco"),
-                    "bairro": ("bairro",),
-                    "municipio": ("municipio", "cidade"),
-                    "uf": ("uf", "estado"),
-                    "cep": ("cep",),
-                    "telefone": ("telefone", "fone"),
-                },
-            ),
-            "transportador": self._normalize_nested(
-                data.get("transportador") or data.get("transporte"),
-                {
-                    "razao_social": ("razao_social", "nome", "transportador"),
-                    "cpf_cnpj": ("cpf_cnpj", "cnpj", "cpf"),
-                    "inscricao_estadual": ("inscricao_estadual", "ie"),
-                    "endereco": ("endereco", "logradouro"),
-                    "municipio": ("municipio", "cidade"),
-                    "uf": ("uf", "estado"),
-                    "placa_veiculo": ("placa_veiculo", "placa"),
-                    "frete_por_conta": ("frete_por_conta", "modalidade_frete"),
-                    "quantidade": ("quantidade", "volumes_quantidade", "qtd_volumes"),
-                    "especie": ("especie", "volumes_especie"),
-                    "peso_bruto": ("peso_bruto",),
-                    "peso_liquido": ("peso_liquido",),
-                },
-            ),
         }
-        for field, aliases in self.top_level_string_fields.items():
-            normalized[field] = self._safe_str(self._find_first(data, aliases))
-        for field, aliases in self.top_level_number_fields.items():
-            normalized[field] = self._number(self._find_first(data, aliases))
 
         if not normalized["produtos"]:
             normalized["produtos"] = [{"descricao": "", "quantidade": 0.0}]
@@ -219,15 +122,8 @@ class ValidationAgent:
                 continue
             normalized.append(
                 {
-                    "codigo": self._safe_str(item.get("codigo") or item.get("cod") or item.get("codigo_produto")),
                     "descricao": self._safe_str(item.get("descricao") or item.get("item")),
-                    "ncm": self._safe_str(item.get("ncm")),
-                    "cst": self._safe_str(item.get("cst") or item.get("csosn")),
-                    "cfop": self._safe_str(item.get("cfop")),
-                    "unidade": self._safe_str(item.get("unidade") or item.get("un") or item.get("u_com")),
                     "quantidade": self._number(item.get("quantidade") or item.get("qtd") or item.get("qtd_item")),
-                    "valor_unitario": self._number(item.get("valor_unitario") or item.get("valor_unit") or item.get("v_un")),
-                    "valor_total": self._number(item.get("valor_total") or item.get("total") or item.get("v_total")),
                 }
             )
         return normalized
@@ -243,7 +139,6 @@ class ValidationAgent:
             normalized.append(
                 {
                     "numero": self._integer(item.get("numero") or item.get("parcela") or 1, default=1),
-                    "descricao": self._safe_str(item.get("descricao") or item.get("duplicata") or item.get("documento")),
                     "data_vencimento": self._safe_str(item.get("data_vencimento") or item.get("vencimento") or item.get("data")),
                     "valor": self._number(item.get("valor") or item.get("valor_total") or 0.0),
                 }

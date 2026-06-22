@@ -11,12 +11,7 @@
     <header class="topbar">
       <div class="topbar-inner">
         <a class="brand" href="/">DocExtract</a>
-        <nav class="topbar-nav" aria-label="Navegação principal">
-          <a href="{% url 'invoices:manage_records' %}">Cadastros</a>
-          <a href="{% url 'invoices:rag_query' %}">Consulta RAG</a>
-          <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?next={% url 'invoices:index' %}">Trocar chave</a>
-          <label class="topbar-upload" for="pdf-input">Enviar Arquivo</label>
-        </nav>
+        <label class="topbar-upload" for="pdf-input">Enviar Arquivo</label>
       </div>
     </header>
 
@@ -67,22 +62,6 @@
           <p id="provider-badge" class="provider-badge" hidden></p>
         </div>
 
-        <div class="result-actions">
-          <button id="analyze-button" class="action-button" type="button" disabled>Analisar Dados</button>
-        </div>
-
-        <section id="analysis-section" class="analysis-section" hidden aria-labelledby="analysis-title">
-          <h2 id="analysis-title">Resultado da Análise</h2>
-          <p id="analysis-summary" class="analysis-summary" hidden></p>
-          <div id="analysis-grid" class="analysis-grid"></div>
-        </section>
-
-        <section id="launch-section" class="launch-section" hidden aria-labelledby="launch-title">
-          <h2 id="launch-title">Resultado do Lançamento</h2>
-          <p id="launch-message" class="launch-message"></p>
-          <div id="launch-grid" class="launch-grid"></div>
-        </section>
-
         <div class="tabs" role="tablist" aria-label="Visualização dos dados extraídos">
           <button id="tab-formatted" class="tab active" type="button" role="tab" aria-controls="formatted-view" aria-selected="true" data-tab="formatted">
             Visualização Formatada
@@ -112,6 +91,6 @@
       <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
     </main>
 
-    <script src="{% static 'invoices/app.js' %}?v=token-debug-2"></script>
+    <script src="{% static 'invoices/app.js' %}"></script>
   </body>
 </html>
