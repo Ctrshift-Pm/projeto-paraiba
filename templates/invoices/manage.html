@@ -9,8 +9,18 @@
     <link rel="stylesheet" href="{% static 'invoices/styles.css' %}?v=stage4-design-2">
   </head>
   <body>
+    <header class="workspace-mobilebar">
+      <button class="nav-toggle" type="button" aria-label="Abrir menu" aria-expanded="false" data-nav-toggle>
+        <span aria-hidden="true" class="nav-toggle-icon nav-toggle-open">☰</span>
+        <span aria-hidden="true" class="nav-toggle-icon nav-toggle-close">×</span>
+      </button>
+      <a class="brand workspace-mobilebrand" href="/">Cadastros</a>
+    </header>
+
+    <button class="nav-backdrop" type="button" aria-label="Fechar menu" hidden data-nav-backdrop></button>
+
     <div class="workspace-shell">
-      <aside class="workspace-sidebar" aria-label="Navegação principal">
+      <aside class="workspace-sidebar" aria-label="Navegação principal" data-nav-panel>
         <div class="workspace-brand">
           <a class="brand workspace-brand-link" href="/">AF</a>
           <div>
@@ -115,6 +125,7 @@
 
     {{ people_options|json_script:"people-options" }}
     {{ classification_options|json_script:"classification-options" }}
+    <script src="{% static 'invoices/nav.js' %}?v=mobile-nav-1"></script>
     <script src="{% static 'invoices/manage.js' %}?v=stage4-document-name-1"></script>
   </body>
 </html>

@@ -60,6 +60,43 @@ svg {
   justify-content: space-between;
 }
 
+.nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--text);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.nav-toggle-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.nav-toggle-close {
+  display: none;
+}
+
+.nav-backdrop {
+  display: none;
+}
+
+.nav-backdrop:not([hidden]) {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  border: 0;
+  background: rgba(15, 23, 42, 0.45);
+}
+
 .brand {
   color: var(--text);
   font-size: 24px;
@@ -1053,12 +1090,67 @@ svg {
 
 @media (max-width: 760px) {
   .topbar {
-    height: 72px;
+    position: sticky;
+    top: 0;
+    z-index: 1200;
+    height: 64px;
   }
 
   .topbar-inner,
   .page-shell {
     width: min(100% - 24px, 1040px);
+  }
+
+  .topbar-inner {
+    gap: 10px;
+  }
+
+  .nav-toggle {
+    display: inline-flex;
+  }
+
+  .nav-toggle-open {
+    display: inline;
+  }
+
+  .topbar-nav {
+    position: fixed;
+    top: 64px;
+    left: 12px;
+    right: 12px;
+    z-index: 1200;
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 24px 60px rgba(18, 24, 33, 0.18);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-8px);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+  }
+
+  .topbar-nav a,
+  .topbar-nav .topbar-action,
+  .topbar-nav .topbar-upload {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .nav-open .topbar-nav {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  .nav-open .nav-toggle-open {
+    display: none;
+  }
+
+  .nav-open .nav-toggle-close {
+    display: inline;
   }
 
   .topbar-upload {
@@ -1700,6 +1792,10 @@ svg {
   background: #eef3f8;
 }
 
+.workspace-mobilebar {
+  display: none;
+}
+
 .workspace-sidebar {
   display: flex;
   flex-direction: column;
@@ -1825,6 +1921,11 @@ svg {
 
 .workspace-userbox a:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+
+html.nav-lock-scroll,
+html.nav-lock-scroll body {
+  overflow: hidden;
 }
 
 /* Stage 4 management workspace. Kept late in the file to override shared button/table rules. */
@@ -2267,34 +2368,80 @@ svg {
     grid-template-columns: 1fr;
   }
 
-  .workspace-sidebar {
-    min-height: auto;
-    padding: 16px 14px;
+  .workspace-mobilebar {
+    position: sticky;
+    top: 0;
+    z-index: 1200;
+    display: flex;
+    align-items: center;
     gap: 12px;
+    height: 56px;
+    padding: 0 12px;
+    background: #ffffff;
+    border-bottom: 1px solid rgba(214, 220, 227, 0.74);
+  }
+
+  .workspace-mobilebrand {
+    color: #111827;
+    font-size: 18px;
+    font-weight: 900;
+    text-decoration: none;
+  }
+
+  .workspace-sidebar {
+    position: fixed;
+    top: 56px;
+    left: 0;
+    bottom: 0;
+    z-index: 1190;
+    width: min(86vw, 312px);
+    min-height: calc(100vh - 56px);
+    padding: 16px 14px 14px;
+    gap: 12px;
+    overflow: auto;
+    transform: translateX(-105%);
+    transition: transform 0.2s ease;
+    box-shadow: 0 24px 60px rgba(18, 24, 33, 0.2);
+  }
+
+  .nav-open .workspace-sidebar {
+    transform: translateX(0);
   }
 
   .workspace-brand {
-    padding-bottom: 12px;
+    padding-bottom: 10px;
   }
 
   .workspace-nav {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+    display: grid;
+    gap: 6px;
   }
 
   .workspace-link,
   .workspace-userbox a {
-    justify-content: center;
+    justify-content: flex-start;
   }
 
-  .workspace-section-label,
-  .workspace-spacer {
-    display: none;
+  .workspace-link {
+    width: 100%;
+    min-height: 40px;
+    padding: 0 12px;
+    font-size: 14px;
+    white-space: nowrap;
   }
 
   .workspace-userbox {
-    padding-top: 12px;
+    margin-top: auto;
+    padding-top: 14px;
     justify-items: start;
+    gap: 8px;
+  }
+
+  .workspace-userbox a {
+    width: 100%;
+    min-height: 40px;
+    padding: 0 12px;
+    font-size: 14px;
   }
 
   .manage-shell {
@@ -2305,6 +2452,11 @@ svg {
   .manage-hero {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .manage-hero > .action-button {
+    width: auto;
+    justify-self: start;
   }
 
   .manage-stats {
@@ -2321,6 +2473,20 @@ svg {
 
   .manage-controls {
     padding: 12px;
+  }
+
+  .manage-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .manage-toolbar input {
+    width: 100%;
+  }
+
+  .manage-toolbar .action-button {
+    width: auto;
+    min-width: 0;
+    justify-self: start;
   }
 
   .manage-result-bar {

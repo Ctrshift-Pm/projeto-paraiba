@@ -11,14 +11,19 @@
   <body>
     <header class="topbar">
       <div class="topbar-inner">
+        <button class="nav-toggle" type="button" aria-label="Abrir menu" aria-expanded="false" data-nav-toggle>
+          <span aria-hidden="true" class="nav-toggle-icon nav-toggle-open">☰</span>
+          <span aria-hidden="true" class="nav-toggle-icon nav-toggle-close">×</span>
+        </button>
         <a class="brand" href="/">DocExtract</a>
-        <nav class="topbar-nav" aria-label="Navegação principal">
+        <nav class="topbar-nav" aria-label="Navegação principal" data-nav-panel>
           <a href="{% url 'invoices:manage_records' %}">Cadastros</a>
           <a href="/">Notas Fiscais</a>
           <a href="{% url 'invoices:rag_query' %}" aria-current="page">Consulta RAG</a>
           <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?logout=1&next={% url 'invoices:rag_query' %}">Sair</a>
         </nav>
       </div>
+      <button class="nav-backdrop" type="button" aria-label="Fechar menu" hidden data-nav-backdrop></button>
     </header>
 
     <main class="page-shell">
@@ -221,6 +226,7 @@
       </section>
     </div>
 
+    <script src="{% static 'invoices/nav.js' %}?v=mobile-nav-1"></script>
     <script>
       document.querySelectorAll(".rag-example-grid button").forEach((item) => {
         item.addEventListener("click", (event) => {

@@ -11,14 +11,19 @@
   <body>
     <header class="topbar">
       <div class="topbar-inner">
+        <button class="nav-toggle" type="button" aria-label="Abrir menu" aria-expanded="false" data-nav-toggle>
+          <span aria-hidden="true" class="nav-toggle-icon nav-toggle-open">☰</span>
+          <span aria-hidden="true" class="nav-toggle-icon nav-toggle-close">×</span>
+        </button>
         <a class="brand" href="/">DocExtract</a>
-        <nav class="topbar-nav" aria-label="Navegação principal">
+        <nav class="topbar-nav" aria-label="Navegação principal" data-nav-panel>
           <a href="{% url 'invoices:manage_records' %}">Cadastros</a>
           <a href="{% url 'invoices:rag_query' %}">Consulta RAG</a>
           <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?logout=1&next={% url 'invoices:index' %}">Sair</a>
           <label class="topbar-upload" for="pdf-input">Enviar Arquivo</label>
         </nav>
       </div>
+      <button class="nav-backdrop" type="button" aria-label="Fechar menu" hidden data-nav-backdrop></button>
     </header>
 
     <main class="page-shell">
@@ -113,6 +118,7 @@
       <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
     </main>
 
+    <script src="{% static 'invoices/nav.js' %}?v=mobile-nav-1"></script>
     <script src="{% static 'invoices/app.js' %}?v=token-debug-2"></script>
   </body>
 </html>
