@@ -1,3 +1,6 @@
+import { applyRemoteStyles, apiUrl, mapBackendRoute } from "./shared.js";
+applyRemoteStyles();
+
 const form = document.querySelector("#upload-form");
 const dropzone = document.querySelector("#dropzone");
 const fileInput = document.querySelector("#pdf-input");
@@ -27,7 +30,7 @@ let latestLaunchPayload = null;
 let latestJson = null;
 
 function redirectToGeminiGate(payload = {}) {
-  window.location.href = payload.redirect_to || "/gemini/";
+  window.location.href = mapBackendRoute(payload.redirect_to, "/gemini.html");
 }
 
 copyButton.disabled = true;
@@ -182,7 +185,7 @@ form.addEventListener("submit", async (event) => {
   clearLaunchState();
 
   try {
-    const response = await fetch("/api/invoices/extract/", {
+    const response = await fetch(apiUrl("/api/invoices/extract/"), {
       method: "POST",
       headers: {
         "X-CSRFToken": getCsrfToken(),
@@ -249,7 +252,7 @@ analyzeButton.addEventListener("click", async () => {
   setAnalyzeButtonState(ANALYZE_BUTTON_STATE.LOADING);
 
   try {
-    const response = await fetch(`/api/invoices/analyze/${latestExtractionId}/`, {
+    const response = await fetch(apiUrl(`/api/invoices/analyze/${latestExtractionId}/`), {
       method: "POST",
       headers: {
         "X-CSRFToken": getCsrfToken(),
@@ -293,7 +296,7 @@ async function executeLaunch() {
   setAnalyzeButtonState(ANALYZE_BUTTON_STATE.DISABLED);
 
   try {
-    const response = await fetch(`/api/invoices/launch/${latestExtractionId}/`, {
+    const response = await fetch(apiUrl(`/api/invoices/launch/${latestExtractionId}/`), {
       method: "POST",
       headers: {
         "X-CSRFToken": getCsrfToken(),

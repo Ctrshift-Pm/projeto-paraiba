@@ -1,10 +1,12 @@
 services:
   db:
     image: postgres:17-alpine
+    container_name: projeto-paraiba-db
     environment:
       POSTGRES_DB: projeto_paraiba
       POSTGRES_USER: projeto
       POSTGRES_PASSWORD: projeto
+      POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
@@ -17,12 +19,16 @@ services:
 
   web:
     build: .
-    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    container_name: projeto-paraiba-web
+    command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
+    env_file:
+      - .env
     environment:
       DJANGO_SECRET_KEY: dev-secret-key
       DJANGO_DEBUG: "1"
       DATABASE_URL: postgres://projeto:projeto@db:5432/projeto_paraiba
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5433}
     ports:
       - "8000:8000"
     volumes:
@@ -30,6 +36,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
