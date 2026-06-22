@@ -53,9 +53,9 @@ def validate_session_login(username: str, password: str) -> tuple[bool, str]:
     username = str(username or "").strip()
     password = str(password or "")
     if not username or not password:
-        return False, "Informe usuario e senha."
+        return False, "Informe usuário e senha."
     if username != ADMIN_USERNAME or password != ADMIN_PASSWORD:
-        return False, "Usuario ou senha invalidos."
+        return False, "Usuário ou senha inválidos."
     return True, ""
 
 
@@ -77,8 +77,8 @@ def validate_gemini_api_key(api_key: str, model: str) -> tuple[bool, str]:
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}".lower()
         if "api_key_invalid" in message or "api key not valid" in message or is_gemini_auth_error(exc):
-            return False, "Chave do Gemini invalida. Passe uma chave valida."
-        return False, "Nao foi possivel validar a chave do Gemini. Passe uma chave valida."
+            return False, "Chave do Gemini inválida. Passe uma chave válida."
+        return False, "Não foi possível validar a chave do Gemini. Passe uma chave válida."
 
 
 def is_gemini_auth_error(exc: Exception) -> bool:

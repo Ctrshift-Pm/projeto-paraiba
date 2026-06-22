@@ -5,96 +5,113 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Cadastros Administrativo-Financeiros</title>
-    <link rel="stylesheet" href="{% static 'invoices/styles.css' %}?v=stage4-design-1">
+    <link rel="icon" type="image/png" href="{% static 'invoices/favicon.png' %}">
+    <link rel="stylesheet" href="{% static 'invoices/styles.css' %}?v=stage4-design-2">
   </head>
   <body>
-    <header class="topbar">
-      <div class="topbar-inner">
-        <a class="brand" href="/">DocExtract</a>
-        <nav class="topbar-nav" aria-label="Navegação principal">
-          <a href="{% url 'invoices:manage_records' %}" aria-current="page">Cadastros</a>
-          <a href="{% url 'invoices:rag_query' %}">Consulta RAG</a>
-          <a href="{% url 'invoices:index' %}">Extração</a>
-          <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?logout=1&next={% url 'invoices:manage_records' %}">Sair</a>
-        </nav>
-      </div>
-    </header>
-
-    <main class="page-shell manage-shell">
-      <section class="manage-hero" aria-labelledby="manage-title">
-        <div class="manage-heading">
-          <span class="manage-eyebrow">Interface administrativo-financeira</span>
-          <h1 id="manage-title">Cadastros</h1>
-          <p>Mantenha contas, pessoas e classificações com busca, ordenação e exclusão lógica.</p>
-        </div>
-        <button id="manage-new-button" class="action-button" type="button">Novo registro</button>
-      </section>
-
-      <section class="manage-stats" aria-label="Resumo de registros ativos">
-        <div class="manage-stat">
-          <span>Contas ativas</span>
-          <strong>{{ active_counts.contas }}</strong>
-        </div>
-        <div class="manage-stat">
-          <span>Pessoas ativas</span>
-          <strong>{{ active_counts.pessoas }}</strong>
-        </div>
-        <div class="manage-stat">
-          <span>Classificações ativas</span>
-          <strong>{{ active_counts.classificacoes }}</strong>
-        </div>
-      </section>
-
-      <section class="manage-controls" aria-label="Controles de cadastro">
-        <div class="manage-tabs" aria-label="Tipo de cadastro">
-          <button class="manage-tab active" type="button" data-resource="contas">Contas</button>
-          <button class="manage-tab" type="button" data-resource="pessoas">Pessoas</button>
-          <button class="manage-tab" type="button" data-resource="classificacoes">Classificações</button>
-        </div>
-
-        <div class="manage-toolbar" aria-label="Busca de registros">
-          <input id="manage-search" type="search" placeholder="Buscar registros ativos">
-          <button id="manage-search-button" class="action-button" type="button">Buscar</button>
-        </div>
-      </section>
-
-      <section class="manage-grid-section" aria-live="polite">
-        <div class="manage-result-bar">
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar" aria-label="Navegação principal">
+        <div class="workspace-brand">
+          <a class="brand workspace-brand-link" href="/">AF</a>
           <div>
-            <strong id="manage-resource-title">Contas</strong>
-            <span id="manage-result-count">Aguardando busca</span>
+            <strong>Cadastros</strong>
+            <span>Projeto Paraiba</span>
           </div>
-          <span class="manage-result-hint">Clique nos cabeçalhos para ordenar</span>
         </div>
-        <div class="table-wrap">
-          <table class="manage-table">
-            <thead id="manage-table-head"></thead>
-            <tbody id="manage-table-body">
-              <tr>
-                <td class="empty-table" colspan="8">Use Buscar para carregar registros ativos.</td>
-              </tr>
-            </tbody>
-          </table>
+
+        <nav class="workspace-nav">
+          <a class="workspace-link" href="{% url 'invoices:index' %}">
+            <span class="nav-icon">⤴</span>
+            <span>Extração de NF</span>
+          </a>
+        </nav>
+
+        <div class="workspace-section-label">Financeiro</div>
+        <nav class="workspace-nav">
+          <button class="workspace-link" type="button" data-resource="contas">
+            <span class="nav-icon">▭</span>
+            <span>Contas</span>
+          </button>
+        </nav>
+
+        <div class="workspace-section-label">Pessoas</div>
+        <nav class="workspace-nav">
+          <button class="workspace-link nav-subitem" type="button" data-resource="pessoas" data-filter-kind="role" data-filter-value="fornecedor">Fornecedor</button>
+          <button class="workspace-link nav-subitem" type="button" data-resource="pessoas" data-filter-kind="role" data-filter-value="cliente">Cliente</button>
+          <button class="workspace-link nav-subitem" type="button" data-resource="pessoas" data-filter-kind="role" data-filter-value="faturado">Faturado</button>
+        </nav>
+
+        <div class="workspace-section-label">Classificação</div>
+        <nav class="workspace-nav">
+          <button class="workspace-link nav-subitem" type="button" data-resource="classificacoes" data-filter-kind="tipo" data-filter-value="receita">Receita</button>
+          <button class="workspace-link nav-subitem" type="button" data-resource="classificacoes" data-filter-kind="tipo" data-filter-value="despesa">Despesa</button>
+        </nav>
+
+        <div class="workspace-spacer"></div>
+
+        <div class="workspace-userbox">
+          <span>admin</span>
+          <a href="{% url 'invoices:gemini_gate' %}?logout=1&next={% url 'invoices:manage_records' %}">Sair</a>
         </div>
-      </section>
+      </aside>
 
-      <dialog id="manage-dialog" class="manage-dialog">
-        <form id="manage-form" method="dialog">
-          {% csrf_token %}
-          <div class="dialog-heading">
-            <h2 id="manage-dialog-title">Novo registro</h2>
-            <button class="icon-button" type="button" data-close-dialog aria-label="Fechar">×</button>
+      <main class="page-shell manage-shell">
+        <section class="manage-hero" aria-labelledby="manage-title">
+          <div class="manage-heading">
+            <span class="manage-eyebrow">Interface administrativo-financeira</span>
+            <h1 id="manage-title">Classificação - Receitas</h1>
+            <p id="manage-description">Gerencie as classificações de receitas.</p>
           </div>
-          <div id="manage-form-fields" class="manage-form-fields"></div>
-          <div class="dialog-actions">
-            <button class="action-button secondary" type="button" data-close-dialog>Cancelar</button>
-            <button id="manage-save-button" class="action-button" type="submit" disabled>Salvar</button>
-          </div>
-        </form>
-      </dialog>
+          <button id="manage-new-button" class="action-button" type="button">+ Inserir Nova</button>
+        </section>
 
-      <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    </main>
+        <section class="manage-controls" aria-label="Controles de cadastro">
+          <div class="manage-toolbar" aria-label="Busca de registros">
+            <input id="manage-search" type="search" placeholder="Buscar por descrição...">
+            <button id="manage-search-button" class="action-button" type="button">Buscar</button>
+            <button id="manage-all-button" class="action-button success" type="button">Todos</button>
+          </div>
+        </section>
+
+        <section class="manage-grid-section" aria-live="polite">
+          <div class="manage-result-bar">
+            <div>
+              <strong id="manage-resource-title">Classificações</strong>
+              <span id="manage-result-count">Aguardando busca</span>
+            </div>
+            <span class="manage-result-hint">Clique nos cabeçalhos para ordenar</span>
+          </div>
+          <div class="table-wrap">
+            <table class="manage-table">
+              <thead id="manage-table-head"></thead>
+              <tbody id="manage-table-body">
+                <tr>
+                  <td class="empty-table" colspan="8">Use Buscar ou Todos para carregar registros.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <dialog id="manage-dialog" class="manage-dialog">
+          <form id="manage-form" method="dialog">
+            {% csrf_token %}
+            <div class="dialog-heading">
+              <h2 id="manage-dialog-title">Novo registro</h2>
+              <button class="icon-button" type="button" data-close-dialog aria-label="Fechar">×</button>
+            </div>
+            <div id="manage-form-error" class="manage-form-error" hidden></div>
+            <div id="manage-form-fields" class="manage-form-fields"></div>
+            <div class="dialog-actions">
+              <button class="action-button secondary" type="button" data-close-dialog>Cancelar</button>
+              <button id="manage-save-button" class="action-button" type="submit" disabled>Salvar</button>
+            </div>
+          </form>
+        </dialog>
+
+        <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+      </main>
+    </div>
 
     {{ people_options|json_script:"people-options" }}
     {{ classification_options|json_script:"classification-options" }}

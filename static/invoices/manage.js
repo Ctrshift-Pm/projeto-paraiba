@@ -3,7 +3,9 @@ const classificationOptions = JSON.parse(document.getElementById("classification
 const csrfToken = document.querySelector("[name=csrfmiddlewaretoken]").value;
 
 const state = {
-  resource: "contas",
+  resource: "",
+  filterKind: "",
+  filterValue: "",
   order: "",
   rows: [],
   hasSearched: false,
@@ -77,33 +79,62 @@ const resources = {
   },
 };
 
+const resourceLabels = {
+  contas: "Contas",
+  pessoas: "Pessoas",
+  classificacoes: "Classificações",
+};
+
+const filterLabels = {
+  pessoas: {
+    fornecedor: "Fornecedores",
+    cliente: "Clientes",
+    faturado: "Faturados",
+  },
+  classificacoes: {
+    receita: "Classificação - Receitas",
+    despesa: "Classificação - Despesas",
+  },
+};
+
 const tableHead = document.getElementById("manage-table-head");
 const tableBody = document.getElementById("manage-table-body");
 const searchInput = document.getElementById("manage-search");
+const allButton = document.getElementById("manage-all-button");
 const dialog = document.getElementById("manage-dialog");
 const form = document.getElementById("manage-form");
 const formFields = document.getElementById("manage-form-fields");
+const formError = document.getElementById("manage-form-error");
 const dialogTitle = document.getElementById("manage-dialog-title");
 const saveButton = document.getElementById("manage-save-button");
 const resourceTitle = document.getElementById("manage-resource-title");
+const heroTitle = document.getElementById("manage-title");
+const heroDescription = document.getElementById("manage-description");
 const resultCount = document.getElementById("manage-result-count");
 const toast = document.getElementById("toast");
 
 document.querySelectorAll(".manage-tab").forEach((button) => {
   button.addEventListener("click", () => {
-    state.resource = button.dataset.resource;
-    state.order = "";
-    state.rows = [];
-    state.hasSearched = false;
-    state.lastQuery = "";
-    state.editingId = null;
-    document.querySelectorAll(".manage-tab").forEach((item) => item.classList.toggle("active", item === button));
-    searchInput.value = "";
-    renderTable();
+    setView(button.dataset.resource, button.dataset.filterKind || "", button.dataset.filterValue || "");
+  });
+});
+
+document.querySelectorAll("[data-resource]").forEach((button) => {
+  if (button.classList.contains("manage-tab")) return;
+  button.addEventListener("click", () => {
+    setView(button.dataset.resource, button.dataset.filterKind || "", button.dataset.filterValue || "");
   });
 });
 
 document.getElementById("manage-search-button").addEventListener("click", () => loadRows());
+allButton.addEventListener("click", () => {
+  if (!state.resource) {
+    showToast("Selecione uma seção antes de buscar.");
+    return;
+  }
+  searchInput.value = "";
+  loadRows(true);
+});
 document.getElementById("manage-new-button").addEventListener("click", () => openForm());
 document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => dialog.close()));
 searchInput.addEventListener("keydown", (event) => {
@@ -127,15 +158,16 @@ form.addEventListener("submit", async (event) => {
     headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
     body: JSON.stringify(payload),
   });
-  const data = await response.json();
+  const data = await readJsonResponse(response);
   if (response.status === 401 || data.redirect_to) {
     redirectToGeminiGate(data);
     return;
   }
   if (!response.ok) {
-    showToast(data.error || "Não foi possível salvar.");
+    showFormError(data.error || "Não foi possível salvar.");
     return;
   }
+  clearFormError();
   syncOptions(data.record);
   dialog.close();
   showToast("Registro salvo.");
@@ -144,7 +176,19 @@ form.addEventListener("submit", async (event) => {
 
 function renderTable() {
   const definition = resources[state.resource];
-  resourceTitle.textContent = pluralLabel();
+  if (!definition) {
+    heroTitle.textContent = "Cadastros";
+    heroDescription.textContent = "Selecione uma seção para carregar registros.";
+    resourceTitle.textContent = "Registros";
+    searchInput.placeholder = "Selecione uma seção...";
+    tableHead.innerHTML = "";
+    tableBody.innerHTML = '<tr><td class="empty-table" colspan="1">Escolha uma seção na navegação lateral.</td></tr>';
+    return;
+  }
+  heroTitle.textContent = currentHeroTitle();
+  heroDescription.textContent = currentHeroDescription();
+  resourceTitle.textContent = currentPluralLabel();
+  searchInput.placeholder = searchPlaceholder();
   const headers = definition.columns
     .map(([key, label]) => `<th scope="col"><button type="button" data-sort="${key}">${label}</button></th>`)
     .join("");
@@ -181,15 +225,20 @@ function renderBody() {
   tableBody.querySelectorAll("[data-delete]").forEach((button) => button.addEventListener("click", () => deleteRow(Number(button.dataset.delete))));
 }
 
-async function loadRows() {
+async function loadRows(forceAll = false) {
+  if (!state.resource) {
+    showToast("Selecione uma seção antes de carregar registros.");
+    return;
+  }
   const params = new URLSearchParams();
   const query = searchInput.value.trim();
   state.hasSearched = true;
   state.lastQuery = query;
+  appendActiveFilter(params, forceAll);
   if (query) params.set("q", query);
-  else params.set("all", "1");
+  else if (forceAll || !hasActiveFilter()) params.set("all", "1");
   const response = await fetch(`/api/cadastros/${state.resource}/?${params.toString()}`);
-  const data = await response.json();
+  const data = await readJsonResponse(response);
   if (response.status === 401 || data.redirect_to) {
     redirectToGeminiGate(data);
     return;
@@ -208,11 +257,103 @@ function emptyTableMessage() {
   return "Nenhum registro ativo encontrado.";
 }
 
+function setView(resource, filterKind = "", filterValue = "") {
+  state.resource = resource;
+  state.filterKind = filterKind;
+  state.filterValue = filterValue;
+  state.order = "";
+  state.rows = [];
+  state.hasSearched = false;
+  state.lastQuery = "";
+  state.editingId = null;
+  searchInput.value = "";
+  updateActiveNav();
+  renderTable();
+  loadRows(false);
+}
+
+function currentPluralLabel() {
+  if (!state.resource) return "Registros";
+  if (state.resource === "pessoas" && state.filterKind === "role" && state.filterValue) {
+    return filterLabels.pessoas[state.filterValue] || "Pessoas";
+  }
+  if (state.resource === "classificacoes" && state.filterKind === "tipo" && state.filterValue) {
+    return filterLabels.classificacoes[state.filterValue] || "Classificações";
+  }
+  return resourceLabels[state.resource] || "Registros";
+}
+
+function searchPlaceholder() {
+  if (!state.resource) return "Selecione uma seção...";
+  if (state.resource === "pessoas") return "Buscar por nome, CPF ou CNPJ...";
+  if (state.resource === "classificacoes") return "Buscar por descrição...";
+  return "Buscar registros ativos...";
+}
+
+function currentHeroTitle() {
+  if (!state.resource) return "Cadastros";
+  if (state.resource === "pessoas" && state.filterKind === "role" && state.filterValue) {
+    return currentPluralLabel();
+  }
+  if (state.resource === "classificacoes" && state.filterKind === "tipo" && state.filterValue) {
+    return currentPluralLabel();
+  }
+  return resourceLabels[state.resource] || "Registros";
+}
+
+function currentHeroDescription() {
+  if (!state.resource) {
+    return "Selecione uma seção para carregar registros.";
+  }
+  if (state.resource === "pessoas" && state.filterKind === "role" && state.filterValue) {
+    return `Gerencie ${currentPluralLabel().toLowerCase()}.`;
+  }
+  if (state.resource === "classificacoes" && state.filterKind === "tipo" && state.filterValue) {
+    return `Gerencie ${currentPluralLabel().toLowerCase()}.`;
+  }
+  if (state.resource === "pessoas") {
+    return "Gerencie as pessoas cadastradas.";
+  }
+  if (state.resource === "classificacoes") {
+    return "Gerencie as classificações cadastradas.";
+  }
+  return "Gerencie contas com busca, ordenação e exclusão lógica.";
+}
+
+function updateActiveNav() {
+  document.querySelectorAll("[data-resource]").forEach((button) => {
+    const isActive = button.dataset.resource === state.resource
+      && (button.dataset.filterKind || "") === state.filterKind
+      && (button.dataset.filterValue || "") === state.filterValue;
+    button.classList.toggle("active", isActive);
+  });
+}
+
+function hasActiveFilter() {
+  return Boolean((state.resource === "pessoas" && state.filterKind === "role" && state.filterValue)
+    || (state.resource === "classificacoes" && state.filterKind === "tipo" && state.filterValue));
+}
+
+function appendActiveFilter(params, forceAll) {
+  if (forceAll) return;
+  if (state.resource === "pessoas" && state.filterKind === "role" && state.filterValue) {
+    params.set("role", state.filterValue);
+  }
+  if (state.resource === "classificacoes" && state.filterKind === "tipo" && state.filterValue) {
+    params.set("tipo", state.filterValue);
+  }
+}
+
 async function openForm(id = null) {
+  if (!state.resource) {
+    showToast("Selecione uma seção antes de inserir registros.");
+    return;
+  }
   state.editingId = id;
   const row = id ? await fetchRecord(id) : {};
   dialogTitle.textContent = `${id ? "Editar" : "Novo"} ${resources[state.resource].label}`;
   formFields.innerHTML = resources[state.resource].fields.map((field) => fieldHtml(field, row)).join("");
+  clearFormError();
   configureFormControls();
   updateSaveState();
   dialog.showModal();
@@ -220,7 +361,7 @@ async function openForm(id = null) {
 
 async function fetchRecord(id) {
   const response = await fetch(`/api/cadastros/${state.resource}/${id}/`);
-  const data = await response.json();
+  const data = await readJsonResponse(response);
   if (response.status === 401 || data.redirect_to) {
     redirectToGeminiGate(data);
     return {};
@@ -234,7 +375,7 @@ async function deleteRow(id) {
     method: "DELETE",
     headers: { "X-CSRFToken": csrfToken },
   });
-  const data = await response.json();
+  const data = await readJsonResponse(response);
   if (response.status === 401 || data.redirect_to) {
     redirectToGeminiGate(data);
     return;
@@ -426,9 +567,7 @@ function sortRows(rows, order) {
 }
 
 function pluralLabel() {
-  if (state.resource === "pessoas") return "Pessoas";
-  if (state.resource === "classificacoes") return "Classificações";
-  return "Contas";
+  return currentPluralLabel();
 }
 
 function cellValue(row, key, label) {
@@ -484,8 +623,35 @@ function showToast(message) {
   }, 2800);
 }
 
+function showFormError(message) {
+  if (!formError) {
+    showToast(message);
+    return;
+  }
+  formError.textContent = message;
+  formError.hidden = false;
+  showToast(message);
+}
+
+function clearFormError() {
+  if (!formError) return;
+  formError.textContent = "";
+  formError.hidden = true;
+}
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    return { error: text };
+  }
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[char]));
 }
 
+updateActiveNav();
 renderTable();

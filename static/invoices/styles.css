@@ -413,6 +413,17 @@ svg {
   padding: 22px;
 }
 
+.manage-form-error {
+  margin: 10px 0 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid #f2c6c4;
+  background: #fff5f5;
+  color: #9f1239;
+  font-size: 14px;
+  font-weight: 700;
+}
+
 .dialog-heading,
 .dialog-actions {
   display: flex;
@@ -1166,6 +1177,11 @@ svg {
   border: 1px solid var(--border);
 }
 
+.action-button.success {
+  background: #16a34a;
+  color: #ffffff;
+}
+
 .action-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -1677,10 +1693,144 @@ svg {
   }
 }
 
+.workspace-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 272px minmax(0, 1fr);
+  background: #eef3f8;
+}
+
+.workspace-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 100vh;
+  padding: 22px 18px 20px;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: linear-gradient(180deg, #1f2937 0%, #172033 100%);
+  color: #d8e2ef;
+}
+
+.workspace-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.workspace-brand .workspace-brand-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: #2f6fed;
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.workspace-brand strong {
+  display: block;
+  color: #ffffff;
+  font-size: 16px;
+  line-height: 1.15;
+}
+
+.workspace-brand span {
+  display: block;
+  margin-top: 4px;
+  color: #93a4bd;
+  font-size: 12px;
+}
+
+.workspace-section-label {
+  padding: 0 6px;
+  color: #8ea0ba;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.workspace-nav {
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  color: #dbe4f0;
+  text-decoration: none;
+  font-weight: 700;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+
+.workspace-link:hover,
+.workspace-link.active {
+  background: #101828;
+  color: #ffffff;
+}
+
+.workspace-link .nav-icon {
+  width: 20px;
+  text-align: center;
+  opacity: 0.85;
+}
+
+.workspace-link.nav-subitem {
+  padding-left: 14px;
+  font-weight: 600;
+}
+
+.workspace-spacer {
+  flex: 1 1 auto;
+}
+
+.workspace-userbox {
+  display: grid;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.workspace-userbox span {
+  color: #dbe4f0;
+  font-size: 14px;
+}
+
+.workspace-userbox a {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: #dbe4f0;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.workspace-userbox a:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 /* Stage 4 management workspace. Kept late in the file to override shared button/table rules. */
 .manage-shell {
   width: min(1280px, calc(100% - 40px));
-  padding: 40px 0 56px;
+  padding: 34px 0 56px;
 }
 
 .manage-hero {
@@ -1754,9 +1904,7 @@ svg {
 
 .manage-controls {
   display: grid;
-  grid-template-columns: auto minmax(320px, 1fr);
-  align-items: center;
-  gap: 16px;
+  gap: 12px;
   margin-bottom: 16px;
   padding: 14px;
   border: 1px solid #d8dee7;
@@ -1798,7 +1946,7 @@ svg {
 
 .manage-toolbar {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto;
+  grid-template-columns: minmax(240px, 1fr) auto auto;
   gap: 10px;
   margin: 0;
 }
@@ -2115,9 +2263,43 @@ svg {
 }
 
 @media (max-width: 760px) {
+  .workspace-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-sidebar {
+    min-height: auto;
+    padding: 16px 14px;
+    gap: 12px;
+  }
+
+  .workspace-brand {
+    padding-bottom: 12px;
+  }
+
+  .workspace-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .workspace-link,
+  .workspace-userbox a {
+    justify-content: center;
+  }
+
+  .workspace-section-label,
+  .workspace-spacer {
+    display: none;
+  }
+
+  .workspace-userbox {
+    padding-top: 12px;
+    justify-items: start;
+  }
+
   .manage-shell {
     width: min(100% - 24px, 1280px);
-    padding-top: 28px;
+    padding: 24px 0 40px;
   }
 
   .manage-hero {
@@ -2133,6 +2315,14 @@ svg {
     grid-template-columns: 1fr;
   }
 
+  .manage-tabs {
+    width: 100%;
+  }
+
+  .manage-controls {
+    padding: 12px;
+  }
+
   .manage-result-bar {
     align-items: flex-start;
     flex-direction: column;
@@ -2140,6 +2330,14 @@ svg {
 
   .manage-form-fields {
     grid-template-columns: 1fr;
+  }
+
+  .row-actions {
+    flex-direction: column;
+  }
+
+  .manage-table {
+    min-width: 860px;
   }
 
   .gate-shell {

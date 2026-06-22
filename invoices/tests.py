@@ -16,7 +16,7 @@ from invoices.agents import ExpenseClassificationAgent, ValidationAgent
 from invoices.agents.extraction import PdfExtractionAgent
 from invoices.agent_RAG import Agent3
 from invoices.management.commands.seed_demo_invoices import DEMO_PREFIX
-from invoices.gemini_session import validate_gemini_api_key
+from invoices.gemini_session import SESSION_KEY, validate_gemini_api_key
 from invoices.services import InvoiceExtractionService
 from invoices.models import Classificacao, InvoiceExtraction, MovimentoContas, ParcelaContas, Pessoa
 from invoices.utils import is_valid_cnpj, is_valid_cpf, mask_cep, mask_cnpj, mask_cpf, mask_ie, mask_phone, only_alnum, only_digits
@@ -1189,6 +1189,7 @@ class ExpenseClassificationAgentTests(TestCase):
 class RAGAgentTests(TestCase):
     def setUp(self) -> None:
         session = self.client.session
+        session[SESSION_KEY] = True
         session["gemini_api_key"] = "test-key"
         session.save()
 
@@ -1664,6 +1665,7 @@ class DocumentUtilsTests(TestCase):
 class Stage4ManageApiTests(TestCase):
     def setUp(self) -> None:
         session = self.client.session
+        session[SESSION_KEY] = True
         session["gemini_api_key"] = "test-key"
         session.save()
 
@@ -1694,8 +1696,7 @@ class Stage4ManageApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Cadastros")
-        self.assertContains(response, "Use Buscar para carregar registros ativos.")
-        self.assertNotContains(response, "Todos ativos")
+        self.assertContains(response, "Use Buscar ou Todos para carregar registros.")
 
         api_response = self.client.get(reverse("invoices:manage_collection", args=["pessoas"]))
         self.assertEqual(api_response.status_code, 200)
@@ -1736,6 +1737,19 @@ class Stage4ManageApiTests(TestCase):
 
         all_response = self.client.get(reverse("invoices:manage_collection", args=["pessoas"]), {"all": "1"})
         self.assertNotIn(created.id, [item["id"] for item in all_response.json()["results"]])
+
+    def test_people_reject_duplicate_cpf_with_clear_message(self) -> None:
+        response = self._post_json(
+            reverse("invoices:manage_collection", args=["pessoas"]),
+            {
+                "razao_social": "CPF DUPLICADO",
+                "cpf": "123.456.789-01",
+                "is_cliente": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("CPF já cadastrado", response.json()["error"])
 
     def test_people_reject_missing_document_or_role(self) -> None:
         missing_document = self._post_json(

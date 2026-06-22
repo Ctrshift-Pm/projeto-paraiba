@@ -5,6 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Acesso ao sistema</title>
+    <link rel="icon" type="image/png" href="{% static 'invoices/favicon.png' %}">
     <link rel="stylesheet" href="{% static 'invoices/styles.css' %}">
   </head>
   <body class="gemini-gate-body">
@@ -36,6 +37,7 @@
             type="text"
             autocomplete="username"
             placeholder="admin"
+            value="{{ username_value }}"
             required
           >
 

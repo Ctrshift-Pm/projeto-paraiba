@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.db import IntegrityError
 from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -62,12 +63,16 @@ def _gemini_gate_url(*, next_path: str = "/", error: str = "") -> str:
 
 
 def _render_gemini_gate(request: HttpRequest, *, next_path: str, error: str = "") -> HttpResponse:
+    username_value = ""
+    if request.method == "POST":
+        username_value = request.POST.get("username", "").strip()
     return render(
         request,
         "invoices/gemini_gate.html",
         {
             "next_path": next_path or reverse("invoices:index"),
             "error": error or request.GET.get("error", ""),
+            "username_value": username_value,
             "logged_in": has_session_login(request),
             "has_gemini_key": has_session_gemini_key(request),
         },
@@ -185,6 +190,8 @@ def manage_collection(request: HttpRequest, resource: str) -> JsonResponse:
         return JsonResponse({"error": "Metodo nao permitido."}, status=405)
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
+    except IntegrityError:
+        return JsonResponse({"error": _duplicate_resource_message(resource, request)}, status=400)
 
 
 @csrf_exempt
@@ -207,6 +214,8 @@ def manage_detail(request: HttpRequest, resource: str, record_id: int) -> JsonRe
         return JsonResponse({"error": "Metodo nao permitido."}, status=405)
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
+    except IntegrityError:
+        return JsonResponse({"error": _duplicate_resource_message(resource, request, record_id=record_id)}, status=400)
 
 
 def _json_payload(request: HttpRequest) -> dict:
@@ -233,15 +242,28 @@ def _resource_model(resource: str):
 def _search_resource(resource: str, request: HttpRequest) -> list[dict]:
     show_all = request.GET.get("all") == "1"
     query = request.GET.get("q", "").strip()
-    if not show_all and not query:
+    role_filter = request.GET.get("role", "").strip().lower()
+    tipo_filter = request.GET.get("tipo", "").strip().lower()
+    has_filter = bool(role_filter or tipo_filter)
+    if not show_all and not query and not has_filter:
         return []
 
     if resource == "pessoas":
         queryset = Pessoa.ativos.all()
+        if role_filter == "fornecedor":
+            queryset = queryset.filter(is_fornecedor=True)
+        elif role_filter == "cliente":
+            queryset = queryset.filter(is_cliente=True)
+        elif role_filter == "faturado":
+            queryset = queryset.filter(is_faturado=True)
         queryset = _apply_terms(queryset, query, ["razao_social", "nome_fantasia", "cpf", "cnpj", "municipio", "uf"])
         queryset = _apply_order(queryset, request.GET.get("order"), {"razao_social", "cpf", "cnpj", "municipio", "uf", "id"})
     elif resource == "classificacoes":
         queryset = Classificacao.ativos.all()
+        if tipo_filter == "receita":
+            queryset = queryset.filter(tipo=Classificacao.Tipo.RECEITA)
+        elif tipo_filter == "despesa":
+            queryset = queryset.filter(tipo=Classificacao.Tipo.DESPESA)
         queryset = _apply_terms(queryset, query, ["tipo", "descricao"])
         queryset = _apply_order(queryset, request.GET.get("order"), {"tipo", "descricao", "id"})
     elif resource == "contas":
@@ -297,6 +319,7 @@ def _apply_order(queryset, order: str | None, allowed: set[str]):
 
 def _create_resource(resource: str, payload: dict):
     if resource == "pessoas":
+        _ensure_unique_person_documents(payload)
         return Pessoa.objects.create(**_person_values(payload), ativo=True)
     if resource == "classificacoes":
         return Classificacao.objects.create(**_classification_values(payload), ativo=True)
@@ -310,6 +333,7 @@ def _create_resource(resource: str, payload: dict):
 
 def _update_resource(resource: str, instance, payload: dict) -> None:
     if resource == "pessoas":
+        _ensure_unique_person_documents(payload, instance=instance)
         values = _person_values(payload)
     elif resource == "classificacoes":
         values = _classification_values(payload)
@@ -363,6 +387,38 @@ def _person_values(payload: dict) -> dict:
         "is_cliente": is_cliente,
         "is_faturado": is_faturado,
     }
+
+
+def _ensure_unique_person_documents(payload: dict, instance: Pessoa | None = None) -> None:
+    cpf = only_digits(payload.get("cpf")) or None
+    cnpj = only_alnum(payload.get("cnpj")) or None
+    queryset = Pessoa.objects.all()
+    if instance is not None:
+        queryset = queryset.exclude(id=instance.id)
+    if cpf and queryset.filter(cpf=cpf).exists():
+        raise ValueError("CPF já cadastrado.")
+    if cnpj and queryset.filter(cnpj=cnpj).exists():
+        raise ValueError("CNPJ já cadastrado.")
+
+
+def _duplicate_resource_message(resource: str, request: HttpRequest, record_id: int | None = None) -> str:
+    if resource != "pessoas":
+        return "Já existe um registro com esses dados."
+    try:
+        payload = _json_payload(request)
+    except ValueError:
+        payload = {}
+    instance = Pessoa.objects.filter(id=record_id).first() if record_id else None
+    cpf = only_digits(payload.get("cpf")) or None
+    cnpj = only_alnum(payload.get("cnpj")) or None
+    queryset = Pessoa.objects.all()
+    if instance is not None:
+        queryset = queryset.exclude(id=instance.id)
+    if cpf and queryset.filter(cpf=cpf).exists():
+        return "CPF já cadastrado."
+    if cnpj and queryset.filter(cnpj=cnpj).exists():
+        return "CNPJ já cadastrado."
+    return "Já existe um registro com esses dados."
 
 
 def _classification_values(payload: dict) -> dict:
@@ -670,14 +726,14 @@ def gemini_gate(request: HttpRequest) -> HttpResponse:
         is_valid, message = validate_session_login(username, password)
         if not is_valid:
             clear_session_login(request)
-            return JsonResponse({"error": message or "Usuario ou senha invalidos."}, status=401)
+            return JsonResponse({"error": message or "Usuário ou senha inválidos."}, status=401)
         if not api_key:
             clear_gemini_api_key(request)
             return JsonResponse({"error": "Informe uma chave do Gemini."}, status=400)
         key_valid, key_message = validate_gemini_api_key(api_key, _gemini_validation_model())
         if not key_valid:
             clear_gemini_api_key(request)
-            return JsonResponse({"error": key_message or "Chave do Gemini invalida."}, status=401)
+            return JsonResponse({"error": key_message or "Chave do Gemini inválida. Passe uma chave válida."}, status=401)
         store_session_login(request)
         store_gemini_api_key(request, api_key)
         return JsonResponse({"success": True, "redirect_to": next_path})
@@ -689,7 +745,7 @@ def gemini_gate(request: HttpRequest) -> HttpResponse:
         is_valid, message = validate_session_login(username, password)
         if not is_valid:
             clear_session_login(request)
-            return _render_gemini_gate(request, next_path=next_path, error=message or "Usuario ou senha invalidos.")
+            return _render_gemini_gate(request, next_path=next_path, error=message or "Usuário ou senha inválidos.")
 
         if not api_key:
             clear_gemini_api_key(request)
@@ -698,7 +754,7 @@ def gemini_gate(request: HttpRequest) -> HttpResponse:
         key_valid, key_message = validate_gemini_api_key(api_key, _gemini_validation_model())
         if not key_valid:
             clear_gemini_api_key(request)
-            return _render_gemini_gate(request, next_path=next_path, error=key_message or "Chave do Gemini invalida.")
+            return _render_gemini_gate(request, next_path=next_path, error=key_message or "Chave do Gemini inválida. Passe uma chave válida.")
 
         store_session_login(request)
         store_gemini_api_key(request, api_key)
