@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 from urllib.parse import urlparse
+from importlib.util import find_spec
 
 from dotenv import load_dotenv
 
@@ -19,12 +20,7 @@ if not SECRET_KEY:
     else:
         raise ValueError("DJANGO_SECRET_KEY nao definido. Configure uma chave segura em producao.")
 
-try:
-    import whitenoise  # noqa: F401
-
-    WHITENOISE_AVAILABLE = True
-except ImportError:
-    WHITENOISE_AVAILABLE = False
+WHITENOISE_AVAILABLE = find_spec("whitenoise") is not None
 
 ALLOWED_HOSTS = [
     host.strip()

@@ -14,7 +14,7 @@
         <nav class="topbar-nav" aria-label="Navegação principal">
           <a href="{% url 'invoices:manage_records' %}">Cadastros</a>
           <a href="{% url 'invoices:rag_query' %}">Consulta RAG</a>
-          <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?next={% url 'invoices:index' %}">Trocar chave</a>
+          <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?logout=1&next={% url 'invoices:index' %}">Sair</a>
           <label class="topbar-upload" for="pdf-input">Enviar Arquivo</label>
         </nav>
       </div>

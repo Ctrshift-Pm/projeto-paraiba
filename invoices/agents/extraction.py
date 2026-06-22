@@ -48,7 +48,12 @@ class PdfExtractionAgent:
                 )
             except Exception as exc:
                 if is_gemini_auth_error(exc):
-                    raise GeminiAccessError("A chave do Gemini está inválida ou expirada.") from exc
+                    self._log_gemini_failure(exc)
+                    return ExtractionResult(
+                        data=self._mock_data(pdf_text),
+                        provider="mock",
+                        fallback_reason="Chave do Gemini invalida ou expirada.",
+                    )
                 self._log_gemini_failure(exc)
                 return ExtractionResult(
                     data=self._mock_data(pdf_text),

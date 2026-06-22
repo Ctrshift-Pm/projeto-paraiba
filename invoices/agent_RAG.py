@@ -951,7 +951,7 @@ class Agent3:
                     return text, "gemini", self._usage_payload(gemini_usage.response_usage_metadata(response))
             except Exception as exc:
                 if is_gemini_auth_error(exc):
-                    raise GeminiAccessError("A chave do Gemini está inválida ou expirada.") from exc
+                    return self._fallback_answer(user_query, documents, mode), "local", {}
 
         return self._fallback_answer(user_query, documents, mode), "local", {}
 

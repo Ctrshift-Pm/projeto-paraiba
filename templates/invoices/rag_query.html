@@ -15,7 +15,7 @@
           <a href="{% url 'invoices:manage_records' %}">Cadastros</a>
           <a href="/">Notas Fiscais</a>
           <a href="{% url 'invoices:rag_query' %}" aria-current="page">Consulta RAG</a>
-          <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?next={% url 'invoices:rag_query' %}">Trocar chave</a>
+          <a class="topbar-action" href="{% url 'invoices:gemini_gate' %}?logout=1&next={% url 'invoices:rag_query' %}">Sair</a>
         </nav>
       </div>
     </header>

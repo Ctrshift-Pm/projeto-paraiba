@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
 import re
 
 from django.conf import settings
 
 
-SESSION_KEY = "gemini_api_key"
+SESSION_KEY = "docextract_logged_in"
+LEGACY_GEMINI_SESSION_KEY = "gemini_api_key"
+ADMIN_USERNAME = os.getenv("DOCEXTRACT_ADMIN_USER", "admin").strip()
+ADMIN_PASSWORD = os.getenv("DOCEXTRACT_ADMIN_PASSWORD", "admin")
 
 
 class GeminiAccessError(RuntimeError):
@@ -14,46 +18,45 @@ class GeminiAccessError(RuntimeError):
 
 def resolve_gemini_api_key(request=None) -> str:
     if request is not None:
-        session_key = str(request.session.get(SESSION_KEY, "") or "").strip()
+        session_key = str(request.session.get(LEGACY_GEMINI_SESSION_KEY, "") or "").strip()
         if session_key:
             return session_key
+        return ""
     return str(getattr(settings, "GEMINI_API_KEY", "") or "").strip()
 
 
 def has_session_gemini_key(request) -> bool:
-    return bool(str(request.session.get(SESSION_KEY, "") or "").strip())
+    return bool(str(request.session.get(LEGACY_GEMINI_SESSION_KEY, "") or "").strip())
 
 
 def store_gemini_api_key(request, api_key: str) -> None:
-    request.session[SESSION_KEY] = str(api_key or "").strip()
+    request.session[LEGACY_GEMINI_SESSION_KEY] = str(api_key or "").strip()
 
 
 def clear_gemini_api_key(request) -> None:
+    request.session.pop(LEGACY_GEMINI_SESSION_KEY, None)
+
+
+def has_session_login(request) -> bool:
+    return bool(request.session.get(SESSION_KEY))
+
+
+def store_session_login(request) -> None:
+    request.session[SESSION_KEY] = True
+
+
+def clear_session_login(request) -> None:
     request.session.pop(SESSION_KEY, None)
 
 
-def is_gemini_auth_error(exc: Exception) -> bool:
-    message = f"{type(exc).__name__}: {exc}".lower()
-    patterns = [
-        r"\b401\b",
-        r"\b403\b",
-        "unauthorized",
-        "permission denied",
-        "invalid api key",
-        "api key",
-        "forbidden",
-        "permission",
-        "authentication",
-        "auth",
-    ]
-    return any(re.search(pattern, message) for pattern in patterns)
-
-
-def _friendly_gemini_validation_error(exc: Exception) -> str:
-    message = f"{type(exc).__name__}: {exc}".lower()
-    if "api_key_invalid" in message or "api key not valid" in message or is_gemini_auth_error(exc):
-        return "Chave do Gemini invalida. Passe uma chave valida."
-    return "Nao foi possivel validar a chave do Gemini. Passe uma chave valida."
+def validate_session_login(username: str, password: str) -> tuple[bool, str]:
+    username = str(username or "").strip()
+    password = str(password or "")
+    if not username or not password:
+        return False, "Informe usuario e senha."
+    if username != ADMIN_USERNAME or password != ADMIN_PASSWORD:
+        return False, "Usuario ou senha invalidos."
+    return True, ""
 
 
 def validate_gemini_api_key(api_key: str, model: str) -> tuple[bool, str]:
@@ -72,4 +75,24 @@ def validate_gemini_api_key(api_key: str, model: str) -> tuple[bool, str]:
         )
         return True, ""
     except Exception as exc:
-        return False, _friendly_gemini_validation_error(exc)
+        message = f"{type(exc).__name__}: {exc}".lower()
+        if "api_key_invalid" in message or "api key not valid" in message or is_gemini_auth_error(exc):
+            return False, "Chave do Gemini invalida. Passe uma chave valida."
+        return False, "Nao foi possivel validar a chave do Gemini. Passe uma chave valida."
+
+
+def is_gemini_auth_error(exc: Exception) -> bool:
+    message = f"{type(exc).__name__}: {exc}".lower()
+    patterns = [
+        r"\b401\b",
+        r"\b403\b",
+        "unauthorized",
+        "permission denied",
+        "invalid api key",
+        "api key",
+        "forbidden",
+        "permission",
+        "authentication",
+        "auth",
+    ]
+    return any(re.search(pattern, message) for pattern in patterns)

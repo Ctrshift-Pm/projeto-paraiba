@@ -18,9 +18,13 @@ from .gemini_session import (
     GeminiAccessError,
     clear_gemini_api_key,
     has_session_gemini_key,
-    resolve_gemini_api_key,
-    store_gemini_api_key,
     validate_gemini_api_key,
+    resolve_gemini_api_key,
+    clear_session_login,
+    has_session_login,
+    store_session_login,
+    validate_session_login,
+    store_gemini_api_key,
 )
 from .models import Classificacao, MovimentoContas, Pessoa
 from .services import InvoiceExtractionService
@@ -44,12 +48,11 @@ MAX_TOTAL_VALUE = Decimal("999999999999.00")
 
 def _gemini_validation_model() -> str:
     return str(
-        getattr(settings, "GEMINI_GATE_MODEL", "")
+        getattr(settings, "GEMINI_EXTRACTION_MODEL", "")
         or getattr(settings, "GEMINI_RAG_MODEL", "")
-        or getattr(settings, "GEMINI_EXTRACTION_MODEL", "")
-        or "gemini-2.5-flash-lite"
+        or getattr(settings, "GEMINI_MODEL", "")
+        or "gemini-2.5-flash"
     ).strip()
-
 
 def _gemini_gate_url(*, next_path: str = "/", error: str = "") -> str:
     params = {"next": next_path}
@@ -65,7 +68,8 @@ def _render_gemini_gate(request: HttpRequest, *, next_path: str, error: str = ""
         {
             "next_path": next_path or reverse("invoices:index"),
             "error": error or request.GET.get("error", ""),
-            "has_key": has_session_gemini_key(request),
+            "logged_in": has_session_login(request),
+            "has_gemini_key": has_session_gemini_key(request),
         },
     )
 
@@ -78,12 +82,20 @@ def _wants_json(request: HttpRequest) -> bool:
 
 
 def _require_gemini_access_page(request: HttpRequest, *, next_path: str) -> HttpResponse | None:
-    if has_session_gemini_key(request):
+    if has_session_login(request) and has_session_gemini_key(request):
         return None
-    return _render_gemini_gate(request, next_path=next_path)
+    error = "Informe o login e a chave do Gemini para continuar."
+    if has_session_login(request) and not has_session_gemini_key(request):
+        error = "Informe a chave do Gemini para continuar."
+    return _render_gemini_gate(request, next_path=next_path, error=error)
+
+
+def _has_full_gemini_access(request: HttpRequest) -> bool:
+    return has_session_login(request) and has_session_gemini_key(request)
 
 
 def _gemini_access_denied_json(request: HttpRequest, *, next_path: str, error: str) -> JsonResponse:
+    clear_session_login(request)
     clear_gemini_api_key(request)
     return JsonResponse({"error": error, "redirect_to": _gemini_gate_url(next_path=next_path, error=error)}, status=401)
 
@@ -125,13 +137,8 @@ def manage_records(request: HttpRequest) -> HttpResponse:
 
 @never_cache
 def rag_query(request: HttpRequest) -> HttpResponse:
-    has_query = False
-    if request.method in {"GET", "POST"}:
-        data = request.GET if request.method == "GET" else request.POST
-        has_query = bool(data.get("query", "").strip())
-
     gate = _require_gemini_access_page(request, next_path=request.get_full_path() or reverse("invoices:rag_query"))
-    if gate is not None and not has_query:
+    if gate is not None:
         return gate
     context = {
         "query": "",
@@ -150,7 +157,6 @@ def rag_query(request: HttpRequest) -> HttpResponse:
                 context["result"] = Agent3(api_key=resolve_gemini_api_key(request)).run_query(context["query"], context["mode"])
                 context["movement_catalog"] = _build_movement_catalog()
             except GeminiAccessError as exc:
-                clear_gemini_api_key(request)
                 if _wants_json(request):
                     return JsonResponse({"error": str(exc), "redirect_to": reverse("invoices:gemini_gate")})
                 return _render_gemini_gate(request, next_path=request.get_full_path() or reverse("invoices:rag_query"), error=str(exc))
@@ -167,6 +173,8 @@ def rag_query(request: HttpRequest) -> HttpResponse:
 
 @csrf_exempt
 def manage_collection(request: HttpRequest, resource: str) -> JsonResponse:
+    if not _has_full_gemini_access(request):
+        return _gemini_access_denied_json(request, next_path=reverse("invoices:manage_records"), error="Faça login e informe a chave do Gemini para acessar os cadastros.")
     try:
         if request.method == "GET":
             return JsonResponse({"results": _search_resource(resource, request)})
@@ -181,6 +189,8 @@ def manage_collection(request: HttpRequest, resource: str) -> JsonResponse:
 
 @csrf_exempt
 def manage_detail(request: HttpRequest, resource: str, record_id: int) -> JsonResponse:
+    if not _has_full_gemini_access(request):
+        return _gemini_access_denied_json(request, next_path=reverse("invoices:manage_records"), error="Faça login e informe a chave do Gemini para acessar os cadastros.")
     try:
         model = _resource_model(resource)
         instance = get_object_or_404(model.objects, id=record_id)
@@ -557,6 +567,8 @@ def extract_invoice(request: HttpRequest) -> JsonResponse:
             {"error": "Metodo nao permitido.", "detail": "Utilize POST em /api/invoices/extract/."},
             status=405,
         )
+    if not _has_full_gemini_access(request):
+        return _gemini_access_denied_json(request, next_path=reverse("invoices:index"), error="Faça login e informe a chave do Gemini para acessar a extracao.")
 
     uploaded_pdf = request.FILES.get("pdf")
     if uploaded_pdf is None:
@@ -578,8 +590,7 @@ def extract_invoice(request: HttpRequest) -> JsonResponse:
         payload = service.extract(uploaded_pdf)
         return JsonResponse(payload)
     except GeminiAccessError as exc:
-        clear_gemini_api_key(request)
-        return _gemini_access_denied_json(request, next_path=reverse("invoices:index"), error=str(exc))
+        return JsonResponse({"error": "Falha ao processar o arquivo.", "detail": str(exc)}, status=400)
     except ValueError as exc:
         service.persistence_agent.save_error(uploaded_pdf, str(exc))
         return JsonResponse(
@@ -601,14 +612,15 @@ def analyze_invoice(request: HttpRequest, extraction_id: int) -> JsonResponse:
             {"error": "Metodo nao permitido.", "detail": "Utilize POST em /api/invoices/analyze/<id>/."},
             status=405,
         )
+    if not _has_full_gemini_access(request):
+        return _gemini_access_denied_json(request, next_path=reverse("invoices:index"), error="Faça login e informe a chave do Gemini para acessar a extracao.")
 
     service = InvoiceExtractionService(gemini_api_key=resolve_gemini_api_key(request))
     try:
         payload = service.analyze(extraction_id)
         return JsonResponse(payload)
     except GeminiAccessError as exc:
-        clear_gemini_api_key(request)
-        return _gemini_access_denied_json(request, next_path=reverse("invoices:index"), error=str(exc))
+        return JsonResponse({"error": "Falha ao analisar o documento.", "detail": str(exc)}, status=400)
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=404)
     except Exception as exc:
@@ -622,14 +634,15 @@ def launch_invoice(request: HttpRequest, extraction_id: int) -> JsonResponse:
             {"error": "Metodo nao permitido.", "detail": "Utilize POST em /api/invoices/launch/<id>/."},
             status=405,
         )
+    if not _has_full_gemini_access(request):
+        return _gemini_access_denied_json(request, next_path=reverse("invoices:index"), error="Faça login e informe a chave do Gemini para acessar a extracao.")
 
     service = InvoiceExtractionService(gemini_api_key=resolve_gemini_api_key(request))
     try:
         payload = service.launch(extraction_id)
         return JsonResponse(payload)
     except GeminiAccessError as exc:
-        clear_gemini_api_key(request)
-        return _gemini_access_denied_json(request, next_path=reverse("invoices:index"), error=str(exc))
+        return JsonResponse({"error": "Falha ao executar o lancamento.", "detail": str(exc)}, status=400)
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=404)
     except Exception as exc:
@@ -645,44 +658,71 @@ def gemini_gate(request: HttpRequest) -> HttpResponse:
     if _wants_json(request):
         if request.method == "GET":
             return JsonResponse({
-                "has_key": has_session_gemini_key(request),
+                "logged_in": has_session_login(request),
+                "has_gemini_key": has_session_gemini_key(request),
                 "next_path": next_path,
             })
         if request.method != "POST":
             return JsonResponse({"error": "Metodo nao permitido."}, status=405)
+        username = request.POST.get("username", "").strip()
+        password = request.POST.get("password", "")
         api_key = request.POST.get("api_key", "").strip()
-        if not api_key:
-            return JsonResponse({"error": "Informe uma chave do Gemini."}, status=400)
-        is_valid, message = validate_gemini_api_key(api_key, _gemini_validation_model())
+        is_valid, message = validate_session_login(username, password)
         if not is_valid:
+            clear_session_login(request)
+            return JsonResponse({"error": message or "Usuario ou senha invalidos."}, status=401)
+        if not api_key:
             clear_gemini_api_key(request)
-            return JsonResponse({"error": message or "Chave do Gemini invalida."}, status=401)
+            return JsonResponse({"error": "Informe uma chave do Gemini."}, status=400)
+        key_valid, key_message = validate_gemini_api_key(api_key, _gemini_validation_model())
+        if not key_valid:
+            clear_gemini_api_key(request)
+            return JsonResponse({"error": key_message or "Chave do Gemini invalida."}, status=401)
+        store_session_login(request)
         store_gemini_api_key(request, api_key)
-        return JsonResponse({"success": True, "next_path": next_path})
+        return JsonResponse({"success": True, "redirect_to": next_path})
 
     if request.method == "POST":
+        username = request.POST.get("username", "").strip()
+        password = request.POST.get("password", "")
         api_key = request.POST.get("api_key", "").strip()
+        is_valid, message = validate_session_login(username, password)
+        if not is_valid:
+            clear_session_login(request)
+            return _render_gemini_gate(request, next_path=next_path, error=message or "Usuario ou senha invalidos.")
+
         if not api_key:
+            clear_gemini_api_key(request)
             return _render_gemini_gate(request, next_path=next_path, error="Informe uma chave do Gemini.")
 
-        is_valid, message = validate_gemini_api_key(api_key, _gemini_validation_model())
-        if not is_valid:
+        key_valid, key_message = validate_gemini_api_key(api_key, _gemini_validation_model())
+        if not key_valid:
             clear_gemini_api_key(request)
-            return _render_gemini_gate(request, next_path=next_path, error=message or "Chave do Gemini invalida.")
+            return _render_gemini_gate(request, next_path=next_path, error=key_message or "Chave do Gemini invalida.")
 
+        store_session_login(request)
         store_gemini_api_key(request, api_key)
         return redirect(next_path)
 
-    if has_session_gemini_key(request):
+    if request.GET.get("logout") == "1":
+        clear_session_login(request)
+        clear_gemini_api_key(request)
+        return redirect(_gemini_gate_url(next_path=next_path, error="Sessao encerrada."))
+
+    if has_session_login(request) and has_session_gemini_key(request):
         return render(
             request,
             "invoices/gemini_gate.html",
             {
                 "next_path": next_path,
                 "error": request.GET.get("error", ""),
-                "has_key": True,
-                "success": "Chave ativa na sessão. Você pode trocar a chave abaixo.",
+                "logged_in": True,
+                "has_gemini_key": has_session_gemini_key(request),
+                "success": "Sessao ativa. Você pode sair ou entrar novamente abaixo.",
             },
         )
+
+    if has_session_login(request) and not has_session_gemini_key(request):
+        return _render_gemini_gate(request, next_path=next_path, error="Informe a chave do Gemini para continuar.")
 
     return _render_gemini_gate(request, next_path=next_path)

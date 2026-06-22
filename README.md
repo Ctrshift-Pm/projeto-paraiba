@@ -133,7 +133,7 @@ python manage.py seed_demo_invoices --count 200
   - `python manage.py collectstatic --noinput`
   - `gunicorn config.wsgi:application`
 - Docker: `docker compose up --build` sobe web + PostgreSQL localmente.
-- Login e senha: a aplicação não exige autenticação própria nesta versão; se a apresentação usar `/admin/`, crie um usuário com `python manage.py createsuperuser`.
+- Login e senha: a aplicação usa a tela interna de acesso com `admin` / `admin` por padrão. Se quiser trocar, configure `DOCEXTRACT_ADMIN_USER` e `DOCEXTRACT_ADMIN_PASSWORD` no `.env`.
 - Chave LLM: não commitar `GEMINI_API_KEY`. Em produção, configurar a variável no painel do servidor. Se estiver vazia, extração usa fallback/mock e RAG usa resposta local quando possível.
 
 ## Debug de tokens na extração de PDF
